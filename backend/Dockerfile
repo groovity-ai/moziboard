@@ -1,15 +1,28 @@
-FROM golang:1.23-alpine
+# Build Stage
+FROM golang:alpine AS builder
 
 WORKDIR /app
 
-COPY go.mod ./
-# RUN go mod download # (Commented out because go.sum is missing)
-
+# Copy source code first
 COPY . .
 
-# Run tidy inside container to ensure deps are resolved
+# Reset & Tidy modules inside container to avoid host conflicts
+RUN rm -f go.mod go.sum
+RUN go mod init moziboard-backend
+# Force specific version compatible with Go 1.23 if needed, or let tidy resolve
+RUN go get github.com/jackc/pgx/v5@v5.7.1
 RUN go mod tidy
-RUN go build -o main .
+
+# Build the binary
+RUN CGO_ENABLED=0 GOOS=linux go build -o main .
+
+# Run Stage
+FROM alpine:latest
+
+WORKDIR /root/
+
+# Copy binary from builder
+COPY --from=builder /app/main .
 
 EXPOSE 8080
 
