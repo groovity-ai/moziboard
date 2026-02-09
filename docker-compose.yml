@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: moziboard-backend
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_HOST=db
+      - DB_USER=moziboard
+      - DB_PASSWORD=moziboard_secret
+      - DB_NAME=moziboard
+      - DB_PORT=5432
+      - REDIS_ADDR=redis:6379
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./backend:/app
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: moziboard-frontend
+    ports:
+      - "3001:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    container_name: moziboard-db
+    environment:
+      - POSTGRES_USER=moziboard
+      - POSTGRES_PASSWORD=moziboard_secret
+      - POSTGRES_DB=moziboard
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: moziboard-redis
+    command: redis-server --appendonly yes --requirepass moziboard_redis_secret
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
