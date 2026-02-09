@@ -27,8 +27,9 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: moziboard-frontend
+    command: npm run dev
     ports:
-      - "3001:3000"
+      - "3002:3000"
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8080
     volumes:
