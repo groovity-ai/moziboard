@@ -6,3 +6,4 @@ backend/main
 backend/go.sum
 frontend/.next/
 frontend/out/
+scripts/dispatcher.log
