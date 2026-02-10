@@ -48,7 +48,15 @@ Unlike traditional tools (Trello, Jira) where AI is an addon, Moziboard treats A
    ```
 
 2. **Setup Environment**
-   Set your OpenAI API Key (if you want semantic search features):
+   Set your API Key (Choose one):
+   
+   **Option A: Google Gemini (Recommended & Free)**
+   ```bash
+   # Get key from aistudio.google.com
+   export GEMINI_API_KEY=AIza...
+   ```
+
+   **Option B: OpenAI**
    ```bash
    export OPENAI_API_KEY=sk-...
    ```
