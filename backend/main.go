@@ -79,16 +79,24 @@ func initDB() {
 
 func initOpenAI() {
 	apiKey := os.Getenv("OPENAI_API_KEY")
+	baseURL := os.Getenv("OPENAI_BASE_URL")
 	if apiKey != "" {
-		openaiClient = openai.NewClient(apiKey)
+		config := openai.DefaultConfig(apiKey)
+		if baseURL != "" {
+			config.BaseURL = baseURL
+		}
+		openaiClient = openai.NewClientWithConfig(config)
 	}
 }
 
 func generateEmbedding(text string) ([]float32, error) {
 	if openaiClient == nil { return nil, fmt.Errorf("OpenAI client not initialized") }
+	model := os.Getenv("EMBEDDING_MODEL")
+	if model == "" { model = string(openai.SmallEmbedding3) }
+
 	resp, err := openaiClient.CreateEmbeddings(context.Background(), openai.EmbeddingRequest{
 		Input: []string{text},
-		Model: openai.SmallEmbedding3,
+		Model: openai.EmbeddingModel(model),
 	})
 	if err != nil { return nil, err }
 	return resp.Data[0].Embedding, nil

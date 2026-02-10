@@ -16,6 +16,8 @@ services:
       - DB_PORT=5432
       - REDIS_ADDR=redis:6379
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
     depends_on:
       - db
       - redis
