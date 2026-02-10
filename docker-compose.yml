@@ -61,6 +61,18 @@ services:
       - redis_data:/data
     restart: unless-stopped
 
+  cloudbeaver:
+    image: dbeaver/cloudbeaver:latest
+    container_name: moziboard-db-ui
+    ports:
+      - "8978:8978"
+    volumes:
+      - cloudbeaver_data:/opt/cloudbeaver/workspace
+    depends_on:
+      - db
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   redis_data:
+  cloudbeaver_data:
