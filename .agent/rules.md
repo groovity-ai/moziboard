@@ -15,6 +15,7 @@ These rules govern how the agent interacts with the project management system (M
    - Create a new task using `mcp_mozi_create_task`.
    - **Title**: Use the user's objective (e.g., "Fix Auth Bug", "Setup Docker").
    - **List**: Set to `doing` (since you are starting it now) or `todo`.
+   - **Assignee**: Set to `antigravity` to indicate it is being handled by the IDE agent.
    - **Description**: Summarize the plan or the user's request.
 
 ### During execution:

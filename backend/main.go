@@ -167,6 +167,7 @@ func seedMembers() {
 		{ID: "devo", Name: "Devo", Role: "agent", Avatar: "🛡️"},
 		{ID: "kodinger", Name: "Kodinger", Role: "agent", Avatar: "👨‍💻"},
 		{ID: "mimin", Name: "Mimin", Role: "agent", Avatar: "📢"},
+		{ID: "antigravity", Name: "Antigravity", Role: "agent", Avatar: "🌌"},
 	}
 	for _, m := range members {
 		db.Exec(context.Background(),
