@@ -45,7 +45,16 @@ async function processTask(task) {
         // 2. Spawn agent session
         const taskContent = `MoziBoard Task ${task.id}: ${task.title}\n${task.description}`;
 
-        const result = await runCommand('openclaw', ['agent', '--agent', agentName, '--message', taskContent]);
+        let args = ['agent', '--agent', agentName, '--message', taskContent];
+        
+        // Handle multi-instance profiles
+        if (agentName === 'kodinger') {
+            args = ['agent', '--profile', 'kodinger', '--agent', agentName, '--message', taskContent];
+        } else if (agentName === 'mochi') {
+            args = ['agent', '--profile', 'mochi', '--agent', agentName, '--message', taskContent];
+        }
+
+        const result = await runCommand('openclaw', args);
         console.log(`Spawned session for agent ${agentName} with task: "MoziBoard Task ${task.id}: ${task.title}..."`);
         if (result) {
             console.log(`Spawn result: ${result}`);
