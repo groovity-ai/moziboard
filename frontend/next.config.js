@@ -8,10 +8,8 @@ const nextConfig = {
         source: '/api/:path*',
         destination: 'http://backend:8080/api/:path*',
       },
-      {
-        source: '/ws',
-        destination: 'http://backend:8080/ws',
-      },
+      // Note: WebSocket (/ws) must be proxied at the Nginx/reverse-proxy level.
+      // Next.js rewrites() does not support WebSocket upgrades.
     ]
   },
 }

@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import crypto from "crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -114,7 +115,7 @@ function createMcpServer() {
       if (name === "list_tasks") {
         const { board_id } = listTasksSchema.parse(args || {});
         let targetBoardId = board_id;
-        
+
         if (!targetBoardId) {
           const boards = await axios.get(`${API_URL}/boards`);
           if (boards.data.length > 0) {
@@ -132,7 +133,7 @@ function createMcpServer() {
 
       if (name === "create_task") {
         const { title, description, list_id, assignee_id } = createTaskSchema.parse(args);
-        
+
         const boards = await axios.get(`${API_URL}/boards`);
         if (boards.data.length === 0) {
           throw new Error("No boards found to create task in.");
@@ -163,10 +164,10 @@ function createMcpServer() {
 
       throw new Error(`Unknown tool: ${name}`);
     } catch (error: any) {
-      const errorMessage = error.response?.data 
-        ? JSON.stringify(error.response.data) 
+      const errorMessage = error.response?.data
+        ? JSON.stringify(error.response.data)
         : error.message;
-        
+
       return {
         content: [{ type: "text", text: `Error: ${errorMessage}` }],
         isError: true,
@@ -180,65 +181,136 @@ function createMcpServer() {
 // --- Express App ---
 const app = express();
 app.use(cors());
-app.use(express.json()); // Restored for debugging, may conflict with streamable? 
-// Wait, if I use streamableTransport.handleRequest(req, res), and req is already consumed by express.json(), it fails.
-// But the user asked to "Restore 'app.use(express.json());'".
-// Let's do it, but check if handleRequest supports pre-parsed body.
-// The SDK docs say handleRequest(req, res, parsedBody?).
-// So I should pass req.body if I use express.json().
+app.use(express.json());
 
 // Auth Middleware
 app.use((req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!MCP_API_KEY) {
-    // If no key configured, warn but maybe allow (dev mode)? 
-    // Spec says "Require Authorization", so we should block.
     console.error("Auth blocked: MCP_API_KEY not set on server");
     res.status(500).json({ error: "Server configuration error: Auth key not set" });
     return;
   }
 
-  if (!authHeader || authHeader !== `Bearer ${MCP_API_KEY}`) {
+  const expected = `Bearer ${MCP_API_KEY}`;
+  if (!authHeader || authHeader.length !== expected.length ||
+    !crypto.timingSafeEqual(Buffer.from(authHeader), Buffer.from(expected))) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
   next();
 });
 
-// Store active transports
-const transports = new Map<string, SSEServerTransport>();
+// --- Transport Storage ---
+const sseTransports = new Map<string, SSEServerTransport>();
+const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
 
-// --- Streamable HTTP Transport (New Spec) ---
-// One transport/server instance per app lifecycle, shared for all connections.
-// State is managed internally by the SDK.
-const streamableTransport = new StreamableHTTPServerTransport();
-const streamableServer = createMcpServer();
-streamableServer.connect(streamableTransport); // Connect once
+// --- Streamable HTTP Transport (MCP Spec 2025-03-26) ---
+// Each client session gets its own transport + server instance.
 
 app.post("/mcp", async (req, res) => {
-  console.log("POST /mcp headers:", req.headers); // Debug headers
-  console.log("POST /mcp body:", JSON.stringify(req.body).substring(0, 200)); // Debug body
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+  console.log(`[MCP] POST /mcp method=${req.body?.method} sessionId=${sessionId || "none"}`);
+
   try {
-    // Pass the request to the transport
-    // The transport handles session IDs, message parsing, and response formatting
-    // Since we use express.json(), we MUST pass req.body as 3rd arg.
-    await streamableTransport.handleRequest(req, res, req.body);
+    if (sessionId && streamableTransports.has(sessionId)) {
+      // Existing session — route request to its transport
+      const transport = streamableTransports.get(sessionId)!;
+      await transport.handleRequest(req, res, req.body);
+    } else if (!sessionId && req.body?.method === "initialize") {
+      // New session — create transport + server, then handle the initialize request
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => crypto.randomUUID(),
+      });
+
+      transport.onclose = () => {
+        const sid = transport.sessionId;
+        if (sid) {
+          console.log(`[MCP] Session closed: ${sid}`);
+          streamableTransports.delete(sid);
+        }
+      };
+
+      const server = createMcpServer();
+      await server.connect(transport);
+
+      // handleRequest processes the initialize message and assigns sessionId
+      await transport.handleRequest(req, res, req.body);
+
+      // Register the session AFTER handleRequest so sessionId is populated
+      if (transport.sessionId) {
+        streamableTransports.set(transport.sessionId, transport);
+        console.log(`[MCP] New session created: ${transport.sessionId}`);
+      }
+    } else {
+      // Invalid request — no session and not an initialize
+      res.status(400).json({
+        jsonrpc: "2.0",
+        error: {
+          code: -32000,
+          message: "Bad Request: No valid session. Send an initialize request first.",
+        },
+        id: req.body?.id ?? null,
+      });
+    }
   } catch (error: any) {
-    console.error('Error handling /mcp request:', error);
-    res.status(500).json({ error: error.message, stack: error.stack });
+    console.error("[MCP] Error handling POST /mcp:", error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        jsonrpc: "2.0",
+        error: { code: -32603, message: error.message },
+        id: req.body?.id ?? null,
+      });
+    }
   }
 });
 
+// GET /mcp — SSE stream for server-initiated messages within a session
+app.get("/mcp", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  console.log(`[MCP] GET /mcp sessionId=${sessionId || "none"}`);
+
+  if (sessionId && streamableTransports.has(sessionId)) {
+    const transport = streamableTransports.get(sessionId)!;
+    await transport.handleRequest(req, res);
+  } else {
+    res.status(400).json({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "No valid session for GET request" },
+      id: null,
+    });
+  }
+});
+
+// DELETE /mcp — Session cleanup
+app.delete("/mcp", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  console.log(`[MCP] DELETE /mcp sessionId=${sessionId || "none"}`);
+
+  if (sessionId && streamableTransports.has(sessionId)) {
+    const transport = streamableTransports.get(sessionId)!;
+    await transport.handleRequest(req, res);
+  } else {
+    res.status(400).json({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "No valid session to delete" },
+      id: null,
+    });
+  }
+});
+
+// --- Legacy SSE Transport ---
 app.get("/sse", async (req, res) => {
-  console.log("New SSE connection");
+  console.log("[SSE] New SSE connection");
   const transport = new SSEServerTransport("/messages", res);
   const server = createMcpServer();
 
-  transports.set(transport.sessionId, transport);
+  sseTransports.set(transport.sessionId, transport);
 
   transport.onclose = () => {
-    console.log("SSE connection closed", transport.sessionId);
-    transports.delete(transport.sessionId);
+    console.log("[SSE] Connection closed:", transport.sessionId);
+    sseTransports.delete(transport.sessionId);
   };
 
   await server.connect(transport);
@@ -251,16 +323,18 @@ app.post("/messages", async (req, res) => {
     return;
   }
 
-  const transport = transports.get(sessionId);
+  const transport = sseTransports.get(sessionId);
   if (!transport) {
     res.status(404).send("Session not found");
     return;
   }
 
-  // Pass the JSON-RPC message to the transport
   await transport.handlePostMessage(req, res);
 });
 
+// --- Start Server ---
 app.listen(PORT, () => {
-  console.log(`MoziBoard MCP Server (SSE) running on port ${PORT}`);
+  console.log(`MoziBoard MCP Server running on port ${PORT}`);
+  console.log(`  Streamable HTTP: POST/GET/DELETE /mcp`);
+  console.log(`  Legacy SSE:      GET /sse + POST /messages`);
 });

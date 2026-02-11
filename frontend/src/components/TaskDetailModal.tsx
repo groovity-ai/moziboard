@@ -42,15 +42,15 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...task, description, assignee_id: assigneeId || null }),
     });
-    mutate('/api/tasks');
+    mutate(`/api/boards/${task.board_id}/tasks`);
     onClose();
   };
 
+  // TODO: Replace with real AI agent integration
   const handleAiChat = async () => {
     if (!chatInput.trim()) return;
     setIsAiProcessing(true);
-    
-    // Simulate AI thinking (replace with real agent call later)
+
     setTimeout(async () => {
       const newContext = `\n\n> **User**: ${chatInput}\n> **AI**: Processed. Added to context.`;
       setDescription((prev) => prev + newContext);
@@ -62,7 +62,7 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
       <div className="flex h-[80vh] w-full max-w-2xl flex-col rounded-2xl bg-white shadow-2xl dark:bg-zinc-900">
-        
+
         {/* Header */}
         <div className="flex items-center justify-between border-b p-4 dark:border-zinc-800">
           <h2 className="text-xl font-bold">{task.title}</h2>
@@ -73,7 +73,7 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
 
         {/* Body */}
         <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-6">
-          
+
           {/* Assignee Selector */}
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2 text-sm font-medium text-gray-500">
@@ -130,7 +130,7 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
               className="w-full rounded-full border bg-gray-100 py-3 pl-4 pr-12 outline-none focus:ring-2 focus:ring-rose-500 dark:bg-zinc-800 dark:border-zinc-700"
               onKeyDown={(e) => e.key === 'Enter' && handleAiChat()}
             />
-            <button 
+            <button
               onClick={handleAiChat}
               disabled={isAiProcessing}
               className="absolute right-2 top-2 rounded-full bg-rose-500 p-2 text-white hover:bg-rose-600 disabled:opacity-50"

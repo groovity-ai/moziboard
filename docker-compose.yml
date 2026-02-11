@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   backend:
-    build: 
+    build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: moziboard-backend
@@ -15,6 +15,7 @@ services:
       - DB_NAME=moziboard
       - DB_PORT=5432
       - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=moziboard_redis_secret
       - GEMINI_API_KEY=${GEMINI_API_KEY}
     depends_on:
       - db
@@ -45,8 +46,8 @@ services:
       - POSTGRES_USER=moziboard
       - POSTGRES_PASSWORD=moziboard_secret
       - POSTGRES_DB=moziboard
-    ports:
-      - "5435:5432"
+    # ports:
+    #   - "5435:5432"  # Uncomment for local dev access
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
@@ -55,8 +56,8 @@ services:
     image: redis:7-alpine
     container_name: moziboard-redis
     command: redis-server --appendonly yes --requirepass moziboard_redis_secret
-    ports:
-      - "6379:6379"
+    # ports:
+    #   - "6379:6379"  # Uncomment for local dev access
     volumes:
       - redis_data:/data
     restart: unless-stopped

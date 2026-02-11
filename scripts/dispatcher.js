@@ -1,5 +1,5 @@
 const axios = require('axios');
-const { exec } = require('child_process');
+const { spawn } = require('child_process');
 
 const BASE_URL = 'http://localhost:8080/api';
 // Agents list as per requirement (lowercase for normalized comparison)
@@ -7,12 +7,17 @@ const AGENTS = ['kodinger', 'devo', 'mozi', 'resepsionis', 'mimin'];
 const POLL_INTERVAL = 60000; // 60 seconds
 
 // Helper to execute shell commands
-const runCommand = (command) => {
+const runCommand = (command, args = []) => {
     return new Promise((resolve, reject) => {
-        exec(command, (error, stdout, stderr) => {
-            if (error) {
-                console.error(`Command failed: ${command}`, error);
-                resolve(null); // Resolve null on error to avoid crashing
+        const proc = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+        let stdout = '';
+        let stderr = '';
+        proc.stdout.on('data', (data) => stdout += data);
+        proc.stderr.on('data', (data) => stderr += data);
+        proc.on('close', (code) => {
+            if (code !== 0) {
+                console.error(`Command failed: ${command} ${args.join(' ')}`, stderr);
+                resolve(null);
             } else {
                 resolve(stdout.trim());
             }
@@ -28,7 +33,7 @@ async function processTask(task) {
         // 1. Update task status
         // Ensure we send the full object with the updated status to avoid data loss
         const updatedTask = { ...task };
-        
+
         // Update list_id to 'doing'
         updatedTask.list_id = 'doing';
         updatedTask.updated_by = agentName;
@@ -38,18 +43,12 @@ async function processTask(task) {
         console.log(`Updated task ${task.id} status to 'doing'.`);
 
         // 2. Spawn agent session
-        // Format: MoziBoard Task <id>: <title>\n<description>
-        const taskContent = `${task.title}\n${task.description}`;
-        
-        // Escape double quotes, backticks, dollar signs in message for shell command
-        const safeTaskContent = taskContent.replace(/"/g, '\\"').replace(/`/g, '\\`').replace(/\$/g, '\\$');
-        
-        const command = `openclaw agent --agent ${agentName} --message "MoziBoard Task ${task.id}: ${safeTaskContent}"`;
-        
-        const result = await runCommand(command);
+        const taskContent = `MoziBoard Task ${task.id}: ${task.title}\n${task.description}`;
+
+        const result = await runCommand('openclaw', ['agent', '--agent', agentName, '--message', taskContent]);
         console.log(`Spawned session for agent ${agentName} with task: "MoziBoard Task ${task.id}: ${task.title}..."`);
         if (result) {
-             console.log(`Spawn result: ${result}`);
+            console.log(`Spawn result: ${result}`);
         }
 
     } catch (error) {
@@ -60,7 +59,7 @@ async function processTask(task) {
 async function pollTasks() {
     try {
         console.log('Polling for tasks...');
-        
+
         // 1. Fetch all boards
         const boardsResponse = await axios.get(`${BASE_URL}/boards`);
         const boards = boardsResponse.data;
@@ -94,14 +93,14 @@ async function pollTasks() {
         // Filter tasks: list_id == 'todo' AND assignee_id in AGENTS
         const todoTasks = allTasks.filter(t => {
             if (!t.assignee_id) return false;
-            
+
             // Check list_id instead of list/status
             const listStatus = (t.list_id || '').toLowerCase();
             const isTodo = listStatus === 'todo';
-            
+
             const assignedLower = t.assignee_id.toLowerCase();
             const isAssigned = AGENTS.includes(assignedLower);
-            
+
             return isTodo && isAssigned;
         });
 

@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
-	"github.com/gofiber/contrib/websocket"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/sashabaranov/go-openai"
@@ -90,11 +90,13 @@ func initDB() {
 	)
 	var err error
 	db, err = pgxpool.New(context.Background(), dbURL)
-	if err != nil { log.Fatalf("Unable to connect to database: %v\n", err) }
+	if err != nil {
+		log.Fatalf("Unable to connect to database: %v\n", err)
+	}
 
 	db.Exec(context.Background(), "CREATE EXTENSION IF NOT EXISTS vector")
 	db.Exec(context.Background(), "CREATE EXTENSION IF NOT EXISTS pgcrypto")
-	
+
 	db.Exec(context.Background(), `
 	CREATE TABLE IF NOT EXISTS boards (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -139,7 +141,7 @@ func initDB() {
 		assignee_id TEXT REFERENCES members(id),
 		CONSTRAINT fk_board FOREIGN KEY(board_id) REFERENCES boards(id) ON DELETE CASCADE
 	);`)
-	
+
 	db.Exec(context.Background(), `
 	CREATE TABLE IF NOT EXISTS activities (
 		id SERIAL PRIMARY KEY,
@@ -152,10 +154,10 @@ func initDB() {
 	);`)
 
 	db.Exec(context.Background(), "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS embedding vector(3072)")
-	
+
 	seedMembers()
 	seedBoardMembers()
-	
+
 	fmt.Println("✅ Database migrated!")
 }
 
@@ -167,14 +169,18 @@ func seedMembers() {
 		{ID: "mimin", Name: "Mimin", Role: "agent", Avatar: "📢"},
 	}
 	for _, m := range members {
-		db.Exec(context.Background(), 
+		db.Exec(context.Background(),
 			"INSERT INTO members (id, name, role, avatar) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO UPDATE SET name=$2, role=$3, avatar=$4",
 			m.ID, m.Name, m.Role, m.Avatar)
 	}
 }
 
 func seedBoardMembers() {
-	rows, _ := db.Query(context.Background(), "SELECT id FROM boards")
+	rows, err := db.Query(context.Background(), "SELECT id FROM boards")
+	if err != nil {
+		fmt.Println("seedBoardMembers: failed to query boards:", err)
+		return
+	}
 	defer rows.Close()
 	var boardIDs []string
 	for rows.Next() {
@@ -183,7 +189,11 @@ func seedBoardMembers() {
 		boardIDs = append(boardIDs, id)
 	}
 
-	mRows, _ := db.Query(context.Background(), "SELECT id FROM members")
+	mRows, err := db.Query(context.Background(), "SELECT id FROM members")
+	if err != nil {
+		fmt.Println("seedBoardMembers: failed to query members:", err)
+		return
+	}
 	defer mRows.Close()
 	var memberIDs []string
 	for mRows.Next() {
@@ -194,7 +204,7 @@ func seedBoardMembers() {
 
 	for _, bid := range boardIDs {
 		for _, mid := range memberIDs {
-			db.Exec(context.Background(), 
+			db.Exec(context.Background(),
 				"INSERT INTO board_members (board_id, member_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
 				bid, mid)
 		}
@@ -202,11 +212,15 @@ func seedBoardMembers() {
 }
 
 func initAI() {
+	// OpenAI client reserved for future use (e.g., chat completions).
+	// Currently only Gemini is used for embeddings.
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	baseURL := os.Getenv("OPENAI_BASE_URL")
 	if apiKey != "" {
 		config := openai.DefaultConfig(apiKey)
-		if baseURL != "" { config.BaseURL = baseURL }
+		if baseURL != "" {
+			config.BaseURL = baseURL
+		}
 		openaiClient = openai.NewClientWithConfig(config)
 	}
 }
@@ -216,12 +230,14 @@ func generateEmbedding(text string) ([]float32, error) {
 	if geminiKey != "" {
 		url := "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=" + geminiKey
 		body := map[string]interface{}{
-			"model": "models/text-embedding-004",
+			"model":   "models/text-embedding-004",
 			"content": map[string]interface{}{"parts": []map[string]interface{}{{"text": text}}},
 		}
 		jsonBody, _ := json.Marshal(body)
 		resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonBody))
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != 200 {
@@ -230,16 +246,21 @@ func generateEmbedding(text string) ([]float32, error) {
 				body["model"] = "models/gemini-embedding-001"
 				jsonBody, _ = json.Marshal(body)
 				resp, err = http.Post(url, "application/json", bytes.NewBuffer(jsonBody))
-				if err != nil { return nil, err }
+				if err != nil {
+					return nil, err
+				}
 				defer resp.Body.Close()
 			}
 			if resp.StatusCode != 200 {
-				buf := new(bytes.Buffer); buf.ReadFrom(resp.Body)
+				buf := new(bytes.Buffer)
+				buf.ReadFrom(resp.Body)
 				return nil, fmt.Errorf("gemini api error %d: %s", resp.StatusCode, buf.String())
 			}
 		}
 		var result GeminiEmbeddingResponse
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil { return nil, err }
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return nil, err
+		}
 		return result.Embedding.Values, nil
 	}
 	return nil, fmt.Errorf("no AI provider configured")
@@ -249,31 +270,40 @@ func main() {
 	initDB()
 	initAI()
 
-	rdb = redis.NewClient(&redis.Options{Addr: os.Getenv("REDIS_ADDR"), Password: "moziboard_redis_secret", DB: 0})
+	rdb = redis.NewClient(&redis.Options{Addr: os.Getenv("REDIS_ADDR"), Password: os.Getenv("REDIS_PASSWORD"), DB: 0})
 
 	app := fiber.New()
-	app.Use(cors.New(cors.Config{ AllowOrigins: "*", AllowHeaders: "Origin, Content-Type, Accept" }))
+	app.Use(cors.New(cors.Config{AllowOrigins: "*", AllowHeaders: "Origin, Content-Type, Accept"}))
 
 	app.Use("/ws", func(c *fiber.Ctx) error {
-		if websocket.IsWebSocketUpgrade(c) { c.Locals("allowed", true); return c.Next() }
+		if websocket.IsWebSocketUpgrade(c) {
+			c.Locals("allowed", true)
+			return c.Next()
+		}
 		return fiber.ErrUpgradeRequired
 	})
 
 	app.Get("/ws", websocket.New(func(c *websocket.Conn) {
-		clientsMu.Lock(); clients[c] = true; clientsMu.Unlock()
+		clientsMu.Lock()
+		clients[c] = true
+		clientsMu.Unlock()
 		defer func() { clientsMu.Lock(); delete(clients, c); clientsMu.Unlock(); c.Close() }()
-		for { if _, _, err := c.ReadMessage(); err != nil { break } }
+		for {
+			if _, _, err := c.ReadMessage(); err != nil {
+				break
+			}
+		}
 	}))
 
 	app.Get("/api/health", func(c *fiber.Ctx) error { return c.JSON(fiber.Map{"status": "ok"}) })
-	
+
 	app.Get("/api/boards", getBoards)
 	app.Post("/api/boards", createBoard)
 	app.Get("/api/boards/:id/tasks", getBoardTasks)
 	app.Get("/api/boards/:id/members", getBoardMembers)
 	app.Post("/api/boards/:id/members", addBoardMember)
 	app.Delete("/api/boards/:id/members/:mid", removeBoardMember)
-	
+
 	app.Post("/api/tasks", createTask)
 	app.Put("/api/tasks/:id", updateTask)
 	app.Get("/api/tasks/:id/activities", getTaskActivities)
@@ -285,23 +315,33 @@ func main() {
 
 func getBoards(c *fiber.Ctx) error {
 	rows, err := db.Query(context.Background(), "SELECT id::text, title, description FROM boards ORDER BY created_at ASC")
-	if err != nil { return c.Status(500).SendString(err.Error()) }
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
 	defer rows.Close()
 	var boards []Board
 	for rows.Next() {
 		var b Board
-		if err := rows.Scan(&b.ID, &b.Title, &b.Description); err != nil { return c.Status(500).SendString(err.Error()) }
+		if err := rows.Scan(&b.ID, &b.Title, &b.Description); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
 		boards = append(boards, b)
 	}
-	if boards == nil { boards = []Board{} }
+	if boards == nil {
+		boards = []Board{}
+	}
 	return c.JSON(boards)
 }
 
 func createBoard(c *fiber.Ctx) error {
 	b := new(Board)
-	if err := c.BodyParser(b); err != nil { return c.Status(400).SendString(err.Error()) }
+	if err := c.BodyParser(b); err != nil {
+		return c.Status(400).SendString(err.Error())
+	}
 	err := db.QueryRow(context.Background(), "INSERT INTO boards (title, description) VALUES ($1, $2) RETURNING id::text", b.Title, b.Description).Scan(&b.ID)
-	if err != nil { return c.Status(500).SendString(err.Error()) }
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
 	db.Exec(context.Background(), "INSERT INTO board_members (board_id, member_id, role) VALUES ($1, 'mirza', 'owner')", b.ID)
 	return c.JSON(b)
 }
@@ -309,29 +349,41 @@ func createBoard(c *fiber.Ctx) error {
 func getBoardTasks(c *fiber.Ctx) error {
 	boardID := c.Params("id")
 	rows, err := db.Query(context.Background(), "SELECT id, board_id::text, title, description, list_id, position, assignee_id FROM tasks WHERE board_id=$1 ORDER BY position ASC", boardID)
-	if err != nil { return c.Status(500).SendString(err.Error()) }
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
 	defer rows.Close()
 	var tasks []Task
 	for rows.Next() {
 		var t Task
-		if err := rows.Scan(&t.ID, &t.BoardID, &t.Title, &t.Description, &t.ListID, &t.Position, &t.AssigneeID); err != nil { return c.Status(500).SendString(err.Error()) }
+		if err := rows.Scan(&t.ID, &t.BoardID, &t.Title, &t.Description, &t.ListID, &t.Position, &t.AssigneeID); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
 		tasks = append(tasks, t)
 	}
-	if tasks == nil { tasks = []Task{} }
+	if tasks == nil {
+		tasks = []Task{}
+	}
 	return c.JSON(tasks)
 }
 
 func getMembers(c *fiber.Ctx) error {
 	rows, err := db.Query(context.Background(), "SELECT id, name, role, avatar FROM members")
-	if err != nil { return c.Status(500).SendString(err.Error()) }
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
 	defer rows.Close()
 	var members []Member
 	for rows.Next() {
 		var m Member
-		if err := rows.Scan(&m.ID, &m.Name, &m.Role, &m.Avatar); err != nil { return c.Status(500).SendString(err.Error()) }
+		if err := rows.Scan(&m.ID, &m.Name, &m.Role, &m.Avatar); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
 		members = append(members, m)
 	}
-	if members == nil { members = []Member{} }
+	if members == nil {
+		members = []Member{}
+	}
 	return c.JSON(members)
 }
 
@@ -344,103 +396,153 @@ func getBoardMembers(c *fiber.Ctx) error {
 		WHERE bm.board_id = $1
 	`
 	rows, err := db.Query(context.Background(), query, boardID)
-	if err != nil { return c.Status(500).SendString(err.Error()) }
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
 	defer rows.Close()
 	var members []Member
 	for rows.Next() {
 		var m Member
-		if err := rows.Scan(&m.ID, &m.Name, &m.Role, &m.Avatar); err != nil { return c.Status(500).SendString(err.Error()) }
+		if err := rows.Scan(&m.ID, &m.Name, &m.Role, &m.Avatar); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
 		members = append(members, m)
 	}
-	if members == nil { members = []Member{} }
+	if members == nil {
+		members = []Member{}
+	}
 	return c.JSON(members)
 }
 
 func addBoardMember(c *fiber.Ctx) error {
 	boardID := c.Params("id")
 	req := new(BoardMemberReq)
-	if err := c.BodyParser(req); err != nil { return c.Status(400).SendString(err.Error()) }
-	if req.Role == "" { req.Role = "editor" }
-	_, err := db.Exec(context.Background(), 
+	if err := c.BodyParser(req); err != nil {
+		return c.Status(400).SendString(err.Error())
+	}
+	if req.Role == "" {
+		req.Role = "editor"
+	}
+	_, err := db.Exec(context.Background(),
 		"INSERT INTO board_members (board_id, member_id, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
 		boardID, req.MemberID, req.Role)
-	if err != nil { return c.Status(500).SendString(err.Error()) }
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
 	return c.SendStatus(200)
 }
 
 func removeBoardMember(c *fiber.Ctx) error {
 	boardID := c.Params("id")
 	memberID := c.Params("mid")
-	_, err := db.Exec(context.Background(), 
+	_, err := db.Exec(context.Background(),
 		"DELETE FROM board_members WHERE board_id=$1 AND member_id=$2",
 		boardID, memberID)
-	if err != nil { return c.Status(500).SendString(err.Error()) }
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
 	return c.SendStatus(200)
 }
 
 func createTask(c *fiber.Ctx) error {
 	t := new(Task)
-	if err := c.BodyParser(t); err != nil { return c.Status(400).SendString(err.Error()) }
+	if err := c.BodyParser(t); err != nil {
+		return c.Status(400).SendString(err.Error())
+	}
 	if t.BoardID == "" {
 		var defaultID string
 		db.QueryRow(context.Background(), "SELECT id::text FROM boards LIMIT 1").Scan(&defaultID)
-		if defaultID == "" { return c.Status(500).SendString("No board found") }
+		if defaultID == "" {
+			return c.Status(500).SendString("No board found")
+		}
 		t.BoardID = defaultID
 	}
+	if t.Title == "" {
+		return c.Status(400).SendString("Title is required")
+	}
+	if t.BoardID == "" {
+		return c.Status(400).SendString("Board ID is required")
+	}
+	if t.ListID == "" {
+		t.ListID = "todo"
+	}
+
 	var id int
-	err := db.QueryRow(context.Background(), 
+	err := db.QueryRow(context.Background(),
 		"INSERT INTO tasks (board_id, title, description, list_id, position, assignee_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
 		t.BoardID, t.Title, t.Description, t.ListID, t.Position, t.AssigneeID).Scan(&id)
-	if err != nil { return c.Status(500).SendString(err.Error()) }
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
 	t.ID = id
-	go updateEmbedding(id, t.Title + " " + t.Description)
+	go updateEmbedding(id, t.Title+" "+t.Description)
 	go broadcastUpdate("UPDATE")
 	return c.JSON(t)
 }
 
 func updateTask(c *fiber.Ctx) error {
 	id, _ := strconv.Atoi(c.Params("id"))
-	
+
 	var oldTask Task
-	err := db.QueryRow(context.Background(), 
-		"SELECT id, board_id::text, title, description, list_id, position, assignee_id FROM tasks WHERE id=$1", 
+	err := db.QueryRow(context.Background(),
+		"SELECT id, board_id::text, title, description, list_id, position, assignee_id FROM tasks WHERE id=$1",
 		id).Scan(&oldTask.ID, &oldTask.BoardID, &oldTask.Title, &oldTask.Description, &oldTask.ListID, &oldTask.Position, &oldTask.AssigneeID)
-	if err != nil { return c.Status(404).SendString("Task not found") }
+	if err != nil {
+		return c.Status(404).SendString("Task not found")
+	}
 
 	newTask := new(Task)
-	if err := c.BodyParser(newTask); err != nil { return c.Status(400).SendString(err.Error()) }
-	
+	if err := c.BodyParser(newTask); err != nil {
+		return c.Status(400).SendString(err.Error())
+	}
+
 	// Preserve existing values if fields are empty/missing
-	if newTask.BoardID == "" { newTask.BoardID = oldTask.BoardID }
-	if newTask.Title == "" { newTask.Title = oldTask.Title }
-	if newTask.Description == "" { newTask.Description = oldTask.Description }
-	if newTask.ListID == "" { newTask.ListID = oldTask.ListID }
-	if newTask.AssigneeID == nil { newTask.AssigneeID = oldTask.AssigneeID }
-	// We keep position as is if it's 0 (might be intentional move to top), 
-	// but generally frontend sends it. Let's assume if it's 0 and not explicitly set, keep old? 
+	if newTask.BoardID == "" {
+		newTask.BoardID = oldTask.BoardID
+	}
+	if newTask.Title == "" {
+		newTask.Title = oldTask.Title
+	}
+	if newTask.Description == "" {
+		newTask.Description = oldTask.Description
+	}
+	if newTask.ListID == "" {
+		newTask.ListID = oldTask.ListID
+	}
+	if newTask.AssigneeID == nil {
+		newTask.AssigneeID = oldTask.AssigneeID
+	}
+	// We keep position as is if it's 0 (might be intentional move to top),
+	// but generally frontend sends it. Let's assume if it's 0 and not explicitly set, keep old?
 	// No, 0 is valid. Let's trust frontend or keep logic simple.
-	// Actually, Go structs default to 0/empty. 
+	// Actually, Go structs default to 0/empty.
 	// To truly distinguish "unset" vs "empty", we'd need pointer fields.
-	// For MVP, if Title is empty, assume we keep old one. 
-	
-	_, err = db.Exec(context.Background(), 
+	// For MVP, if Title is empty, assume we keep old one.
+
+	_, err = db.Exec(context.Background(),
 		"UPDATE tasks SET title=$1, description=$2, list_id=$3, position=$4, assignee_id=$5, board_id=$6 WHERE id=$7",
 		newTask.Title, newTask.Description, newTask.ListID, newTask.Position, newTask.AssigneeID, newTask.BoardID, id)
-	if err != nil { return c.Status(500).SendString(err.Error()) }
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
 
 	userID := "mirza" // Default
 	if newTask.UpdatedBy != "" {
 		userID = newTask.UpdatedBy
 	}
-	
+
 	if newTask.ListID != oldTask.ListID {
 		go logActivity(id, userID, "moved", fmt.Sprintf("Moved to list %s", newTask.ListID))
 	}
-	
+
 	newAssignee, oldAssignee := "", ""
-	if newTask.AssigneeID != nil { newAssignee = *newTask.AssigneeID }
-	if oldTask.AssigneeID != nil { oldAssignee = *oldTask.AssigneeID }
-	
+	if newTask.AssigneeID != nil {
+		newAssignee = *newTask.AssigneeID
+	}
+	if oldTask.AssigneeID != nil {
+		oldAssignee = *oldTask.AssigneeID
+	}
+
 	if newAssignee != oldAssignee {
 		if newAssignee != "" {
 			go logActivity(id, userID, "assigned", fmt.Sprintf("Assigned to %s", newAssignee))
@@ -453,13 +555,13 @@ func updateTask(c *fiber.Ctx) error {
 		go logActivity(id, userID, "updated", "Updated task description")
 	}
 
-	go updateEmbedding(id, newTask.Title + " " + newTask.Description)
+	go updateEmbedding(id, newTask.Title+" "+newTask.Description)
 	go broadcastUpdate("UPDATE")
 	return c.JSON(newTask)
 }
 
 func logActivity(taskID int, userID, action, details string) {
-	db.Exec(context.Background(), 
+	db.Exec(context.Background(),
 		"INSERT INTO activities (task_id, user_id, action, details) VALUES ($1, $2, $3, $4)",
 		taskID, userID, action, details)
 }
@@ -467,7 +569,9 @@ func logActivity(taskID int, userID, action, details string) {
 func getTaskActivities(c *fiber.Ctx) error {
 	taskID := c.Params("id")
 	rows, err := db.Query(context.Background(), "SELECT id, task_id, user_id, action, details, created_at FROM activities WHERE task_id=$1 ORDER BY created_at DESC", taskID)
-	if err != nil { return c.Status(500).SendString(err.Error()) }
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
 	defer rows.Close()
 	var activities []Activity
 	for rows.Next() {
@@ -477,35 +581,52 @@ func getTaskActivities(c *fiber.Ctx) error {
 		}
 		activities = append(activities, a)
 	}
-	if activities == nil { activities = []Activity{} }
+	if activities == nil {
+		activities = []Activity{}
+	}
 	return c.JSON(activities)
 }
 
 func updateEmbedding(id int, text string) {
 	emb, err := generateEmbedding(text)
-	if err != nil { log.Printf("Emb err: %v", err); return }
+	if err != nil {
+		log.Printf("Emb err: %v", err)
+		return
+	}
 	_, err = db.Exec(context.Background(), "UPDATE tasks SET embedding = $1 WHERE id = $2", pgvector(emb), id)
-	if err != nil { log.Printf("Db emb err: %v", err) }
+	if err != nil {
+		log.Printf("Db emb err: %v", err)
+	}
 }
 
 func pgvector(v []float32) string { b, _ := json.Marshal(v); return string(b) }
 
 func searchTasks(c *fiber.Ctx) error {
 	query := c.Query("q")
-	if query == "" { return c.Status(400).SendString("Query required") }
+	if query == "" {
+		return c.Status(400).SendString("Query required")
+	}
 	emb, err := generateEmbedding(query)
-	if err != nil { return c.Status(500).SendString(err.Error()) }
-	rows, err := db.Query(context.Background(), 
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+	rows, err := db.Query(context.Background(),
 		"SELECT id, board_id::text, title, description, list_id, position, assignee_id FROM tasks ORDER BY embedding <=> $1 LIMIT 5",
 		pgvector(emb))
-	if err != nil { return c.Status(500).SendString(err.Error()) }
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
 	defer rows.Close()
 	var tasks []Task
 	for rows.Next() {
 		var t Task
-		if err := rows.Scan(&t.ID, &t.BoardID, &t.Title, &t.Description, &t.ListID, &t.Position, &t.AssigneeID); err != nil { return c.Status(500).SendString(err.Error()) }
+		if err := rows.Scan(&t.ID, &t.BoardID, &t.Title, &t.Description, &t.ListID, &t.Position, &t.AssigneeID); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
 		tasks = append(tasks, t)
 	}
-	if tasks == nil { tasks = []Task{} }
+	if tasks == nil {
+		tasks = []Task{}
+	}
 	return c.JSON(tasks)
 }

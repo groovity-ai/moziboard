@@ -51,33 +51,55 @@ interface BoardProps {
 }
 
 export function Board({ boardId }: BoardProps) {
-  const { data: tasks, error } = useSWR<Task[]>(`/api/boards/${boardId}/tasks`, fetcher, { 
+  const { data: tasks, error } = useSWR<Task[]>(`/api/boards/${boardId}/tasks`, fetcher, {
     revalidateOnFocus: false,
-    refreshInterval: 0 
+    refreshInterval: 0
   });
-  
+
   const [lists, setLists] = useState<ListType[]>(defaultLists);
   const [activeTask, setActiveTask] = useState<Task | null>(null);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
-  // WebSocket Setup
+  // WebSocket Setup with reconnection
   useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`; 
-    
-    console.log("Connecting to WS:", wsUrl);
-    const ws = new WebSocket(wsUrl);
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: ReturnType<typeof setTimeout>;
+    let reconnectDelay = 1000;
+    const MAX_RECONNECT_DELAY = 30000;
 
-    ws.onopen = () => console.log("✅ WS Connected");
-    ws.onmessage = (event) => {
-      console.log("📩 WS Update:", event.data);
-      if (event.data === "UPDATE") {
-        mutate(`/api/boards/${boardId}/tasks`);
-      }
+    function connect() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+      console.log("Connecting to WS:", wsUrl);
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        console.log("✅ WS Connected");
+        reconnectDelay = 1000; // Reset on successful connect
+      };
+      ws.onmessage = (event) => {
+        console.log("📩 WS Update:", event.data);
+        if (event.data === "UPDATE") {
+          mutate(`/api/boards/${boardId}/tasks`);
+        }
+      };
+      ws.onclose = () => {
+        console.log(`❌ WS Disconnected. Reconnecting in ${reconnectDelay / 1000}s...`);
+        reconnectTimeout = setTimeout(() => {
+          reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+          connect();
+        }, reconnectDelay);
+      };
+      ws.onerror = () => ws?.close();
+    }
+
+    connect();
+
+    return () => {
+      clearTimeout(reconnectTimeout);
+      ws?.close();
     };
-    ws.onclose = () => console.log("❌ WS Disconnected");
-
-    return () => ws.close();
   }, [boardId]);
 
   useEffect(() => {
@@ -106,7 +128,7 @@ export function Board({ boardId }: BoardProps) {
 
   const handleDragStart = (event: DragStartEvent) => {
     const { active } = event;
-    const task = tasks?.find((t) => t.id == active.id);
+    const task = tasks?.find((t) => String(t.id) === String(active.id));
     if (task) setActiveTask(task);
   };
 
@@ -115,19 +137,19 @@ export function Board({ boardId }: BoardProps) {
     if (!over) return;
     const activeId = active.id;
     const overId = over.id;
-    let task = tasks?.find((t) => t.id == activeId);
+    let task = tasks?.find((t) => String(t.id) === String(activeId));
     if (!task) return;
 
     let newListId = task.list_id;
     if (defaultLists.some(l => l.id === overId)) {
-        newListId = overId as string;
+      newListId = overId as string;
     } else {
-        const overTask = tasks?.find(t => t.id == overId);
-        if (overTask) newListId = overTask.list_id;
+      const overTask = tasks?.find(t => String(t.id) === String(overId));
+      if (overTask) newListId = overTask.list_id;
     }
 
     if (task.list_id !== newListId) {
-        await updateTask({ ...task, list_id: newListId });
+      await updateTask({ ...task, list_id: newListId });
     }
     setActiveTask(null);
   };
@@ -141,19 +163,19 @@ export function Board({ boardId }: BoardProps) {
     >
       <div className="flex h-full w-full flex-col p-4">
         <div className="mb-4 flex w-full justify-center">
-            <SearchBar onTaskSelect={(task) => setSelectedTask(task)} />
+          <SearchBar onTaskSelect={(task) => setSelectedTask(task)} />
         </div>
 
         <div className="flex h-full w-full gap-4 overflow-x-auto">
-            {lists.map((list) => (
-            <ListContainer 
-                key={list.id} 
-                list={list} 
-                boardId={boardId}
-                onTaskClick={(task) => setSelectedTask(task)} 
+          {lists.map((list) => (
+            <ListContainer
+              key={list.id}
+              list={list}
+              boardId={boardId}
+              onTaskClick={(task) => setSelectedTask(task)}
             />
-            ))}
-            <DragOverlay>{activeTask ? <TaskCard task={activeTask} /> : null}</DragOverlay>
+          ))}
+          <DragOverlay>{activeTask ? <TaskCard task={activeTask} /> : null}</DragOverlay>
         </div>
       </div>
 

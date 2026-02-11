@@ -1,15 +1,20 @@
 const axios = require('axios');
-const { exec } = require('child_process');
+const { spawn } = require('child_process');
 
 const BASE_URL = 'http://localhost:8080/api';
 const REPORT_TO_ID = '41434457'; // Telegram ID
 const STALE_THRESHOLD_HOURS = 24;
 
-async function runCommand(command) {
+async function runCommand(command, args = []) {
     return new Promise((resolve, reject) => {
-        exec(command, (error, stdout, stderr) => {
-            if (error) {
-                console.warn(`Command failed: ${command}`, stderr);
+        const proc = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+        let stdout = '';
+        let stderr = '';
+        proc.stdout.on('data', (data) => stdout += data);
+        proc.stderr.on('data', (data) => stderr += data);
+        proc.on('close', (code) => {
+            if (code !== 0) {
+                console.warn(`Command failed: ${command} ${args.join(' ')}`, stderr);
                 resolve(null);
             } else {
                 resolve(stdout.trim());
@@ -21,11 +26,11 @@ async function runCommand(command) {
 async function checkBlockers() {
     try {
         console.log('🔍 Hunting for blockers...');
-        
+
         // 1. Fetch Boards
         const boardsRes = await axios.get(`${BASE_URL}/boards`);
         const boards = boardsRes.data;
-        
+
         let staleTasks = [];
 
         for (const board of boards) {
@@ -53,7 +58,7 @@ async function checkBlockers() {
                 // 4. Check Stale Status
                 let isStale = false;
                 let hoursStuck = 0;
-                
+
                 if (lastActivityTime) {
                     const diffMs = new Date() - lastActivityTime;
                     const diffHours = diffMs / (1000 * 60 * 60);
@@ -81,17 +86,13 @@ async function checkBlockers() {
         // 5. Report
         if (staleTasks.length > 0) {
             console.log(`⚠️ Found ${staleTasks.length} stale tasks.`);
-            
+
             let message = "🚨 **MoziBoard Blocker Report**\n\nThe following tasks have been stuck in 'Doing' for >24 hours:\n\n";
             staleTasks.forEach(t => {
                 message += `• **${t.title}** (${t.assignee})\n   Board: ${t.board} | Stuck: ${t.hours}h\n`;
             });
 
-            console.log('Sending report via OpenClaw...');
-            // Escape special chars for shell command
-            const safeMessage = message.replace(/"/g, '\\"').replace(/`/g, '\\`').replace(/\$/g, '\\$');
-            
-            await runCommand(`openclaw message send --target telegram:${REPORT_TO_ID} --message "${safeMessage}"`);
+            await runCommand('openclaw', ['message', 'send', '--target', `telegram:${REPORT_TO_ID}`, '--message', message]);
             console.log('✅ Report sent.');
         } else {
             console.log('✅ No blockers found! Team is moving fast.');
