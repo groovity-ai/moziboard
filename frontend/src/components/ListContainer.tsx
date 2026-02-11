@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { useDroppable } from '@dnd-kit/core';
 import { TaskCard } from './TaskCard';
 import { ListType, Task } from './Board';
 import { mutate } from 'swr';
@@ -14,6 +15,10 @@ interface ListContainerProps {
 export function ListContainer({ list, boardId, onTaskClick }: ListContainerProps) {
   const [isAdding, setIsAdding] = useState(false);
   const [newTitle, setNewTitle] = useState('');
+
+  const { setNodeRef } = useDroppable({
+    id: list.id,
+  });
 
   const handleAddTask = async () => {
     if (!newTitle.trim()) return;
@@ -36,6 +41,7 @@ export function ListContainer({ list, boardId, onTaskClick }: ListContainerProps
 
   return (
     <div
+      ref={setNodeRef}
       className="flex h-fit w-[350px] shrink-0 flex-col gap-4 rounded-xl bg-gray-100 p-4 shadow-sm dark:bg-zinc-900"
     >
       <div
