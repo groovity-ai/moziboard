@@ -68,6 +68,17 @@ const searchDocsSchema = z.object({
   board_id: z.string().optional().describe("Board ID to limit search scope (defaults to all boards)"),
 });
 
+// --- Comment Schemas ---
+const listCommentsSchema = z.object({
+  task_id: z.number().describe("Task ID to list comments from"),
+});
+
+const postCommentSchema = z.object({
+  task_id: z.number().describe("Task ID to comment on"),
+  user_id: z.string().describe("Agent/User ID posting the comment"),
+  content: z.string().describe("Comment content"),
+});
+
 // --- Server Factory ---
 // We create a new MCP Server instance for each client connection
 function createMcpServer() {
@@ -191,6 +202,31 @@ function createMcpServer() {
               board_id: { type: "string", description: "Board ID to limit search scope" },
             },
             required: ["query"],
+          },
+        },
+        // --- Comments ---
+        {
+          name: "list_comments",
+          description: "List all comments on a task. Use to read the discussion thread.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              task_id: { type: "number", description: "Task ID" },
+            },
+            required: ["task_id"],
+          },
+        },
+        {
+          name: "post_comment",
+          description: "Post a comment on a task. Use to reply to discussions or provide updates.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              task_id: { type: "number", description: "Task ID" },
+              user_id: { type: "string", description: "Your agent ID (e.g. 'antigravity')" },
+              content: { type: "string", description: "Comment content" },
+            },
+            required: ["task_id", "user_id", "content"],
           },
         },
       ],
@@ -322,6 +358,24 @@ function createMcpServer() {
         const params: any = { q: query };
         if (board_id) params.board_id = board_id;
         const response = await axios.get(`${API_URL}/docs/search`, { params });
+        return {
+          content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }],
+        };
+      }
+
+      // --- Comments ---
+
+      if (name === "list_comments") {
+        const { task_id } = listCommentsSchema.parse(args);
+        const response = await axios.get(`${API_URL}/tasks/${task_id}/comments`);
+        return {
+          content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }],
+        };
+      }
+
+      if (name === "post_comment") {
+        const { task_id, user_id, content } = postCommentSchema.parse(args);
+        const response = await axios.post(`${API_URL}/tasks/${task_id}/comments`, { user_id, content });
         return {
           content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }],
         };

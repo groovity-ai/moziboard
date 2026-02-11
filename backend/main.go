@@ -75,6 +75,14 @@ type Document struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+type Comment struct {
+	ID        int       `json:"id"`
+	TaskID    int       `json:"task_id"`
+	UserID    string    `json:"user_id"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type GeminiEmbeddingResponse struct {
 	Embedding struct {
 		Values []float32 `json:"values"`
@@ -176,6 +184,16 @@ func initDB() {
 	);`)
 
 	db.Exec(context.Background(), "ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding vector(3072)")
+
+	db.Exec(context.Background(), `
+	CREATE TABLE IF NOT EXISTS comments (
+		id SERIAL PRIMARY KEY,
+		task_id INT NOT NULL,
+		user_id TEXT NOT NULL,
+		content TEXT NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		CONSTRAINT fk_comment_task FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+	);`)
 
 	seedMembers()
 	seedBoardMembers()
@@ -339,6 +357,10 @@ func main() {
 	app.Put("/api/docs/:id", updateDoc)
 	app.Delete("/api/docs/:id", deleteDoc)
 	app.Get("/api/docs/search", searchDocs)
+
+	// Comments
+	app.Get("/api/tasks/:id/comments", getTaskComments)
+	app.Post("/api/tasks/:id/comments", createComment)
 
 	log.Fatal(app.Listen(":8080"))
 }
@@ -812,4 +834,49 @@ func searchDocs(c *fiber.Ctx) error {
 		docs = []Document{}
 	}
 	return c.JSON(docs)
+}
+
+func getTaskComments(c *fiber.Ctx) error {
+	taskID, _ := strconv.Atoi(c.Params("id"))
+	rows, err := db.Query(context.Background(),
+		"SELECT c.id, c.task_id, c.user_id, c.content, c.created_at FROM comments c WHERE c.task_id=$1 ORDER BY c.created_at ASC", taskID)
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+	defer rows.Close()
+	var comments []Comment
+	for rows.Next() {
+		var cm Comment
+		if err := rows.Scan(&cm.ID, &cm.TaskID, &cm.UserID, &cm.Content, &cm.CreatedAt); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+		comments = append(comments, cm)
+	}
+	if comments == nil {
+		comments = []Comment{}
+	}
+	return c.JSON(comments)
+}
+
+func createComment(c *fiber.Ctx) error {
+	taskID, _ := strconv.Atoi(c.Params("id"))
+	cm := new(Comment)
+	if err := c.BodyParser(cm); err != nil {
+		return c.Status(400).SendString(err.Error())
+	}
+	if cm.UserID == "" || cm.Content == "" {
+		return c.Status(400).SendString("user_id and content are required")
+	}
+	var id int
+	var createdAt time.Time
+	err := db.QueryRow(context.Background(),
+		"INSERT INTO comments (task_id, user_id, content) VALUES ($1, $2, $3) RETURNING id, created_at",
+		taskID, cm.UserID, cm.Content).Scan(&id, &createdAt)
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+	cm.ID = id
+	cm.TaskID = taskID
+	cm.CreatedAt = createdAt
+	return c.JSON(cm)
 }
