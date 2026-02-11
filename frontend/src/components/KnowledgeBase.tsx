@@ -1,8 +1,8 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import useSWR, { mutate } from 'swr';
-import { Plus, FileText, Trash2, Save, X, ChevronLeft } from 'lucide-react';
+import { Plus, FileText, Trash2, Save, X, ChevronLeft, Search } from 'lucide-react';
 
 const fetcher = (url: string) => fetch(url).then((res) => res.json());
 
@@ -27,6 +27,26 @@ export function KnowledgeBase({ boardId }: KnowledgeBaseProps) {
     const [editContent, setEditContent] = useState('');
     const [isCreating, setIsCreating] = useState(false);
     const [newTitle, setNewTitle] = useState('');
+    const [searchQuery, setSearchQuery] = useState('');
+    const [searchResults, setSearchResults] = useState<Doc[] | null>(null);
+    const [isSearching, setIsSearching] = useState(false);
+
+    const handleSearch = useCallback(async (q: string) => {
+        if (!q.trim()) {
+            setSearchResults(null);
+            return;
+        }
+        setIsSearching(true);
+        try {
+            const res = await fetch(`/api/docs/search?q=${encodeURIComponent(q)}&board_id=${boardId}`);
+            const data = await res.json();
+            setSearchResults(data);
+        } catch {
+            setSearchResults([]);
+        } finally {
+            setIsSearching(false);
+        }
+    }, [boardId]);
 
     const handleSelectDoc = (doc: Doc) => {
         setSelectedDoc(doc);
@@ -87,6 +107,35 @@ export function KnowledgeBase({ boardId }: KnowledgeBaseProps) {
                     </button>
                 </div>
 
+                {/* Search Bar */}
+                <div className="border-b p-3 dark:border-zinc-800">
+                    <div className="relative">
+                        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                        <input
+                            type="text"
+                            value={searchQuery}
+                            onChange={(e) => {
+                                setSearchQuery(e.target.value);
+                                if (!e.target.value.trim()) setSearchResults(null);
+                            }}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') handleSearch(searchQuery);
+                                if (e.key === 'Escape') { setSearchQuery(''); setSearchResults(null); }
+                            }}
+                            placeholder="Search docs..."
+                            className="w-full rounded-lg border bg-white py-1.5 pl-8 pr-3 text-sm outline-none focus:border-rose-500 focus:ring-1 focus:ring-rose-500 dark:bg-zinc-800 dark:border-zinc-700"
+                        />
+                    </div>
+                    {searchResults !== null && (
+                        <button
+                            onClick={() => { setSearchQuery(''); setSearchResults(null); }}
+                            className="mt-1 text-xs text-rose-500 hover:underline"
+                        >
+                            Clear search
+                        </button>
+                    )}
+                </div>
+
                 {isCreating && (
                     <div className="border-b p-3 dark:border-zinc-800">
                         <input
@@ -111,13 +160,19 @@ export function KnowledgeBase({ boardId }: KnowledgeBaseProps) {
                 )}
 
                 <div className="flex-1 overflow-y-auto">
-                    {docs?.length === 0 && !isCreating && (
+                    {isSearching && (
+                        <div className="p-4 text-center text-sm text-gray-400">Searching...</div>
+                    )}
+                    {searchResults !== null && !isSearching && searchResults.length === 0 && (
+                        <div className="p-4 text-center text-sm text-gray-400">No results found.</div>
+                    )}
+                    {(searchResults ?? docs)?.length === 0 && searchResults === null && !isCreating && (
                         <div className="p-6 text-center text-sm text-gray-400">
                             No documents yet.<br />
                             Click <strong>+</strong> to create one.
                         </div>
                     )}
-                    {docs?.map((doc) => (
+                    {(searchResults ?? docs)?.map((doc) => (
                         <button
                             key={doc.id}
                             onClick={() => handleSelectDoc(doc)}

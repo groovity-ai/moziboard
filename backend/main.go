@@ -175,6 +175,8 @@ func initDB() {
 		CONSTRAINT fk_doc_board FOREIGN KEY(board_id) REFERENCES boards(id) ON DELETE CASCADE
 	);`)
 
+	db.Exec(context.Background(), "ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding vector(3072)")
+
 	seedMembers()
 	seedBoardMembers()
 
@@ -336,6 +338,7 @@ func main() {
 	app.Post("/api/boards/:id/docs", createDoc)
 	app.Put("/api/docs/:id", updateDoc)
 	app.Delete("/api/docs/:id", deleteDoc)
+	app.Get("/api/docs/search", searchDocs)
 
 	log.Fatal(app.Listen(":8080"))
 }
@@ -704,6 +707,7 @@ func createDoc(c *fiber.Ctx) error {
 	d.BoardID = boardID
 	d.CreatedAt = createdAt
 	d.UpdatedAt = updatedAt
+	go updateDocEmbedding(id, d.Title+" "+d.Content)
 	return c.JSON(d)
 }
 
@@ -742,6 +746,7 @@ func updateDoc(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
+	go updateDocEmbedding(id, existing.Title+" "+existing.Content)
 	return c.JSON(existing)
 }
 
@@ -755,4 +760,56 @@ func deleteDoc(c *fiber.Ctx) error {
 		return c.Status(404).SendString("Document not found")
 	}
 	return c.SendStatus(200)
+}
+
+func updateDocEmbedding(id int, text string) {
+	emb, err := generateEmbedding(text)
+	if err != nil {
+		log.Printf("Doc emb err: %v", err)
+		return
+	}
+	_, err = db.Exec(context.Background(), "UPDATE documents SET embedding = $1 WHERE id = $2", pgvector(emb), id)
+	if err != nil {
+		log.Printf("Doc db emb err: %v", err)
+	}
+}
+
+func searchDocs(c *fiber.Ctx) error {
+	query := c.Query("q")
+	boardID := c.Query("board_id")
+	if query == "" {
+		return c.Status(400).SendString("Query required")
+	}
+	emb, err := generateEmbedding(query)
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+
+	var sqlQuery string
+	var args []interface{}
+	if boardID != "" {
+		sqlQuery = "SELECT id, board_id::text, title, content, created_at, updated_at FROM documents WHERE board_id=$1 AND embedding IS NOT NULL ORDER BY embedding <=> $2 LIMIT 5"
+		args = []interface{}{boardID, pgvector(emb)}
+	} else {
+		sqlQuery = "SELECT id, board_id::text, title, content, created_at, updated_at FROM documents WHERE embedding IS NOT NULL ORDER BY embedding <=> $1 LIMIT 5"
+		args = []interface{}{pgvector(emb)}
+	}
+
+	rows, err := db.Query(context.Background(), sqlQuery, args...)
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+	defer rows.Close()
+	var docs []Document
+	for rows.Next() {
+		var d Document
+		if err := rows.Scan(&d.ID, &d.BoardID, &d.Title, &d.Content, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+		docs = append(docs, d)
+	}
+	if docs == nil {
+		docs = []Document{}
+	}
+	return c.JSON(docs)
 }

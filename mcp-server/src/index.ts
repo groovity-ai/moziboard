@@ -63,6 +63,11 @@ const updateDocSchema = z.object({
   content: z.string().optional(),
 });
 
+const searchDocsSchema = z.object({
+  query: z.string().describe("Search query (natural language)"),
+  board_id: z.string().optional().describe("Board ID to limit search scope (defaults to all boards)"),
+});
+
 // --- Server Factory ---
 // We create a new MCP Server instance for each client connection
 function createMcpServer() {
@@ -174,6 +179,18 @@ function createMcpServer() {
               content: { type: "string" },
             },
             required: ["id"],
+          },
+        },
+        {
+          name: "search_docs",
+          description: "Semantic search across Knowledge Base documents. Use this to find relevant project documentation, specs, or context.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: "Search query (natural language)" },
+              board_id: { type: "string", description: "Board ID to limit search scope" },
+            },
+            required: ["query"],
           },
         },
       ],
@@ -295,6 +312,16 @@ function createMcpServer() {
       if (name === "update_doc") {
         const { id, ...updateData } = updateDocSchema.parse(args);
         const response = await axios.put(`${API_URL}/docs/${id}`, updateData);
+        return {
+          content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }],
+        };
+      }
+
+      if (name === "search_docs") {
+        const { query, board_id } = searchDocsSchema.parse(args);
+        const params: any = { q: query };
+        if (board_id) params.board_id = board_id;
+        const response = await axios.get(`${API_URL}/docs/search`, { params });
         return {
           content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }],
         };
