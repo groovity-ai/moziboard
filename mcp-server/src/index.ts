@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -11,7 +12,7 @@ import { z } from "zod";
 
 // --- Configuration ---
 const PORT = 3005;
-const API_URL = "http://localhost:8080/api";
+const API_URL = process.env.API_URL || "http://localhost:8080/api";
 const MCP_API_KEY = process.env.MCP_API_KEY;
 
 if (!MCP_API_KEY) {
@@ -179,7 +180,12 @@ function createMcpServer() {
 // --- Express App ---
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json()); // Restored for debugging, may conflict with streamable? 
+// Wait, if I use streamableTransport.handleRequest(req, res), and req is already consumed by express.json(), it fails.
+// But the user asked to "Restore 'app.use(express.json());'".
+// Let's do it, but check if handleRequest supports pre-parsed body.
+// The SDK docs say handleRequest(req, res, parsedBody?).
+// So I should pass req.body if I use express.json().
 
 // Auth Middleware
 app.use((req, res, next) => {
@@ -201,6 +207,27 @@ app.use((req, res, next) => {
 
 // Store active transports
 const transports = new Map<string, SSEServerTransport>();
+
+// --- Streamable HTTP Transport (New Spec) ---
+// One transport/server instance per app lifecycle, shared for all connections.
+// State is managed internally by the SDK.
+const streamableTransport = new StreamableHTTPServerTransport();
+const streamableServer = createMcpServer();
+streamableServer.connect(streamableTransport); // Connect once
+
+app.post("/mcp", async (req, res) => {
+  console.log("POST /mcp headers:", req.headers); // Debug headers
+  console.log("POST /mcp body:", JSON.stringify(req.body).substring(0, 200)); // Debug body
+  try {
+    // Pass the request to the transport
+    // The transport handles session IDs, message parsing, and response formatting
+    // Since we use express.json(), we MUST pass req.body as 3rd arg.
+    await streamableTransport.handleRequest(req, res, req.body);
+  } catch (error: any) {
+    console.error('Error handling /mcp request:', error);
+    res.status(500).json({ error: error.message, stack: error.stack });
+  }
+});
 
 app.get("/sse", async (req, res) => {
   console.log("New SSE connection");
