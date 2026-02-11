@@ -41,6 +41,7 @@ export type ListType = {
 const fetcher = (url: string) => fetch(url).then((res) => res.json());
 
 const defaultLists = [
+  { id: 'backlog', title: 'Backlog', tasks: [] },
   { id: 'todo', title: 'To Do', tasks: [] },
   { id: 'doing', title: 'In Progress', tasks: [] },
   { id: 'done', title: 'Done', tasks: [] },
