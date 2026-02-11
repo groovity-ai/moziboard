@@ -42,6 +42,27 @@ const updateTaskSchema = z.object({
   updated_by: z.string().optional().describe("Agent/User ID performing the update"),
 });
 
+// --- Document Schemas ---
+const listDocsSchema = z.object({
+  board_id: z.string().optional().describe("Board ID (defaults to the first board)"),
+});
+
+const getDocSchema = z.object({
+  id: z.number().describe("Document ID"),
+});
+
+const createDocSchema = z.object({
+  title: z.string().describe("Document title"),
+  content: z.string().optional().default("").describe("Document content (Markdown)"),
+  board_id: z.string().optional().describe("Board ID (defaults to the first board)"),
+});
+
+const updateDocSchema = z.object({
+  id: z.number().describe("Document ID"),
+  title: z.string().optional(),
+  content: z.string().optional(),
+});
+
 // --- Server Factory ---
 // We create a new MCP Server instance for each client connection
 function createMcpServer() {
@@ -104,6 +125,57 @@ function createMcpServer() {
             required: ["id"],
           },
         },
+        // --- Knowledge Base / Documents ---
+        {
+          name: "list_docs",
+          description: "List all documents from a board's Knowledge Base",
+          inputSchema: {
+            type: "object",
+            properties: {
+              board_id: {
+                type: "string",
+                description: "Board ID (defaults to the first board)",
+              },
+            },
+          },
+        },
+        {
+          name: "get_doc",
+          description: "Get full content of a specific document",
+          inputSchema: {
+            type: "object",
+            properties: {
+              id: { type: "number", description: "Document ID" },
+            },
+            required: ["id"],
+          },
+        },
+        {
+          name: "create_doc",
+          description: "Create a new document in the Knowledge Base",
+          inputSchema: {
+            type: "object",
+            properties: {
+              title: { type: "string", description: "Document title" },
+              content: { type: "string", description: "Document content (Markdown)" },
+              board_id: { type: "string", description: "Board ID (defaults to the first board)" },
+            },
+            required: ["title"],
+          },
+        },
+        {
+          name: "update_doc",
+          description: "Update an existing document",
+          inputSchema: {
+            type: "object",
+            properties: {
+              id: { type: "number", description: "Document ID" },
+              title: { type: "string" },
+              content: { type: "string" },
+            },
+            required: ["id"],
+          },
+        },
       ],
     };
   });
@@ -157,6 +229,72 @@ function createMcpServer() {
       if (name === "update_task") {
         const { id, ...updateData } = updateTaskSchema.parse(args);
         const response = await axios.put(`${API_URL}/tasks/${id}`, updateData);
+        return {
+          content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }],
+        };
+      }
+
+      // --- Knowledge Base / Documents ---
+
+      if (name === "list_docs") {
+        const { board_id } = listDocsSchema.parse(args || {});
+        let targetBoardId = board_id;
+
+        if (!targetBoardId) {
+          const boards = await axios.get(`${API_URL}/boards`);
+          if (boards.data.length > 0) {
+            targetBoardId = boards.data[0].id;
+          } else {
+            return { content: [{ type: "text", text: "No boards found." }] };
+          }
+        }
+
+        const docs = await axios.get(`${API_URL}/boards/${targetBoardId}/docs`);
+        return {
+          content: [{ type: "text", text: JSON.stringify(docs.data, null, 2) }],
+        };
+      }
+
+      if (name === "get_doc") {
+        const { id } = getDocSchema.parse(args);
+        // Get all docs and find the one with matching ID
+        const boards = await axios.get(`${API_URL}/boards`);
+        for (const board of boards.data) {
+          const docs = await axios.get(`${API_URL}/boards/${board.id}/docs`);
+          const doc = docs.data.find((d: any) => d.id === id);
+          if (doc) {
+            return {
+              content: [{ type: "text", text: JSON.stringify(doc, null, 2) }],
+            };
+          }
+        }
+        return {
+          content: [{ type: "text", text: `Document with ID ${id} not found.` }],
+          isError: true,
+        };
+      }
+
+      if (name === "create_doc") {
+        const { title, content, board_id } = createDocSchema.parse(args);
+        let targetBoardId = board_id;
+
+        if (!targetBoardId) {
+          const boards = await axios.get(`${API_URL}/boards`);
+          if (boards.data.length === 0) {
+            throw new Error("No boards found to create doc in.");
+          }
+          targetBoardId = boards.data[0].id;
+        }
+
+        const response = await axios.post(`${API_URL}/boards/${targetBoardId}/docs`, { title, content });
+        return {
+          content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }],
+        };
+      }
+
+      if (name === "update_doc") {
+        const { id, ...updateData } = updateDocSchema.parse(args);
+        const response = await axios.put(`${API_URL}/docs/${id}`, updateData);
         return {
           content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }],
         };

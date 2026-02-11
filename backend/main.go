@@ -66,6 +66,15 @@ type BoardMemberReq struct {
 	Role     string `json:"role"`
 }
 
+type Document struct {
+	ID        int       `json:"id"`
+	BoardID   string    `json:"board_id"`
+	Title     string    `json:"title"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type GeminiEmbeddingResponse struct {
 	Embedding struct {
 		Values []float32 `json:"values"`
@@ -154,6 +163,17 @@ func initDB() {
 	);`)
 
 	db.Exec(context.Background(), "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS embedding vector(3072)")
+
+	db.Exec(context.Background(), `
+	CREATE TABLE IF NOT EXISTS documents (
+		id SERIAL PRIMARY KEY,
+		board_id UUID NOT NULL,
+		title TEXT NOT NULL,
+		content TEXT DEFAULT '',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		CONSTRAINT fk_doc_board FOREIGN KEY(board_id) REFERENCES boards(id) ON DELETE CASCADE
+	);`)
 
 	seedMembers()
 	seedBoardMembers()
@@ -310,6 +330,12 @@ func main() {
 	app.Get("/api/tasks/:id/activities", getTaskActivities)
 	app.Get("/api/search", searchTasks)
 	app.Get("/api/members", getMembers)
+
+	// Knowledge Base / Documents
+	app.Get("/api/boards/:id/docs", getBoardDocs)
+	app.Post("/api/boards/:id/docs", createDoc)
+	app.Put("/api/docs/:id", updateDoc)
+	app.Delete("/api/docs/:id", deleteDoc)
 
 	log.Fatal(app.Listen(":8080"))
 }
@@ -630,4 +656,103 @@ func searchTasks(c *fiber.Ctx) error {
 		tasks = []Task{}
 	}
 	return c.JSON(tasks)
+}
+
+// --- Knowledge Base / Documents ---
+
+func getBoardDocs(c *fiber.Ctx) error {
+	boardID := c.Params("id")
+	rows, err := db.Query(context.Background(),
+		"SELECT id, board_id::text, title, content, created_at, updated_at FROM documents WHERE board_id=$1 ORDER BY updated_at DESC",
+		boardID)
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+	defer rows.Close()
+	var docs []Document
+	for rows.Next() {
+		var d Document
+		if err := rows.Scan(&d.ID, &d.BoardID, &d.Title, &d.Content, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+		docs = append(docs, d)
+	}
+	if docs == nil {
+		docs = []Document{}
+	}
+	return c.JSON(docs)
+}
+
+func createDoc(c *fiber.Ctx) error {
+	boardID := c.Params("id")
+	d := new(Document)
+	if err := c.BodyParser(d); err != nil {
+		return c.Status(400).SendString(err.Error())
+	}
+	if d.Title == "" {
+		return c.Status(400).SendString("Title is required")
+	}
+	var id int
+	var createdAt, updatedAt time.Time
+	err := db.QueryRow(context.Background(),
+		"INSERT INTO documents (board_id, title, content) VALUES ($1, $2, $3) RETURNING id, created_at, updated_at",
+		boardID, d.Title, d.Content).Scan(&id, &createdAt, &updatedAt)
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+	d.ID = id
+	d.BoardID = boardID
+	d.CreatedAt = createdAt
+	d.UpdatedAt = updatedAt
+	return c.JSON(d)
+}
+
+func updateDoc(c *fiber.Ctx) error {
+	id, _ := strconv.Atoi(c.Params("id"))
+	d := new(Document)
+	if err := c.BodyParser(d); err != nil {
+		return c.Status(400).SendString(err.Error())
+	}
+
+	var existing Document
+	err := db.QueryRow(context.Background(),
+		"SELECT id, board_id::text, title, content FROM documents WHERE id=$1", id).Scan(
+		&existing.ID, &existing.BoardID, &existing.Title, &existing.Content)
+	if err != nil {
+		return c.Status(404).SendString("Document not found")
+	}
+
+	if d.Title != "" {
+		existing.Title = d.Title
+	}
+	if d.Content != "" {
+		existing.Content = d.Content
+	}
+
+	_, err = db.Exec(context.Background(),
+		"UPDATE documents SET title=$1, content=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$3",
+		existing.Title, existing.Content, id)
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+
+	err = db.QueryRow(context.Background(),
+		"SELECT id, board_id::text, title, content, created_at, updated_at FROM documents WHERE id=$1", id).Scan(
+		&existing.ID, &existing.BoardID, &existing.Title, &existing.Content, &existing.CreatedAt, &existing.UpdatedAt)
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+	return c.JSON(existing)
+}
+
+func deleteDoc(c *fiber.Ctx) error {
+	id, _ := strconv.Atoi(c.Params("id"))
+	result, err := db.Exec(context.Background(), "DELETE FROM documents WHERE id=$1", id)
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+	if result.RowsAffected() == 0 {
+		return c.Status(404).SendString("Document not found")
+	}
+	return c.SendStatus(200)
 }
