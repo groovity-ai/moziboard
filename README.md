@@ -110,3 +110,37 @@ Tasks are automatically embedded using Gemini/OpenAI models upon creation or upd
 ## 📝 License
 
 Proprietary / Internal Use for Groovity AI Team.
+
+## 🔌 MCP Integration
+
+Connect your AI IDE (Antigravity, Cursor, etc.) to MoziBoard to enable automated task management.
+
+### Configuration (`mcp_config.json`)
+
+Add the following to your MCP client configuration:
+
+```json
+{
+    "mcpServers": {
+        "mozi": {
+            "command": "/Users/muhmirza/.nvm/versions/node/v20.19.6/bin/mcp-remote",
+            "args": [
+                "https://mcp.mozi.my.id/mcp",
+                "--header",
+                "Authorization: Bearer <YOUR_MCP_API_KEY>"
+            ]
+        }
+    }
+}
+```
+
+> **Note**: Replace `<YOUR_MCP_API_KEY>` with the key defined in your `.env` file.
+
+### 🤖 Automated Agent Rules
+
+To enable the agent to automatically track your work in MoziBoard, add the following rules to your **Custom Instructions** or project-specific `.agent/rules.md`:
+
+1.  **Check Existing Tasks**: Before starting work, search for existing tasks using `mcp_mozi_list_tasks`.
+2.  **Create New Task**: If no relevant task exists, create one with `mcp_mozi_create_task` (status: `todo`).
+3.  **Track Progress**: Move task to `doing` when starting, and `done` when finished using `mcp_mozi_update_task`.
+
