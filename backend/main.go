@@ -409,8 +409,20 @@ func updateTask(c *fiber.Ctx) error {
 
 	newTask := new(Task)
 	if err := c.BodyParser(newTask); err != nil { return c.Status(400).SendString(err.Error()) }
+	
+	// Preserve existing values if fields are empty/missing
 	if newTask.BoardID == "" { newTask.BoardID = oldTask.BoardID }
-
+	if newTask.Title == "" { newTask.Title = oldTask.Title }
+	if newTask.Description == "" { newTask.Description = oldTask.Description }
+	if newTask.ListID == "" { newTask.ListID = oldTask.ListID }
+	if newTask.AssigneeID == nil { newTask.AssigneeID = oldTask.AssigneeID }
+	// We keep position as is if it's 0 (might be intentional move to top), 
+	// but generally frontend sends it. Let's assume if it's 0 and not explicitly set, keep old? 
+	// No, 0 is valid. Let's trust frontend or keep logic simple.
+	// Actually, Go structs default to 0/empty. 
+	// To truly distinguish "unset" vs "empty", we'd need pointer fields.
+	// For MVP, if Title is empty, assume we keep old one. 
+	
 	_, err = db.Exec(context.Background(), 
 		"UPDATE tasks SET title=$1, description=$2, list_id=$3, position=$4, assignee_id=$5, board_id=$6 WHERE id=$7",
 		newTask.Title, newTask.Description, newTask.ListID, newTask.Position, newTask.AssigneeID, newTask.BoardID, id)
