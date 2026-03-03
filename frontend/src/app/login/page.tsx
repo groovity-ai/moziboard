@@ -30,6 +30,8 @@ export default function LoginPage() {
             const data = await res.json();
 
             if (res.ok) {
+                // Set cookie manually since AiAgenz backend only returns JSON token
+                document.cookie = `session_id=${data.token}; path=/; max-age=604800`;
                 toast.success("Login successful!");
                 // Assuming board ID generation or list happens in the backend, fallback to generic /dashboard or create a new board
                 // For now, redirect to a test board or a list

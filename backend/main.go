@@ -643,8 +643,8 @@ func getAiAgenzProjects(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized: Missing authentication cookie"})
 	}
 
-	// Assuming the AiAgenz backend is running on localhost:4001
-	proxyURL := "http://localhost:4001/api/projects"
+	// Assuming the AiAgenz backend is running on 172.17.0.1:4001
+	proxyURL := "http://172.17.0.1:4001/api/projects"
 
 	req, err := http.NewRequest("GET", proxyURL, nil)
 	if err != nil {
@@ -674,7 +674,7 @@ func getAiAgenzProjects(c *fiber.Ctx) error {
 
 // proxyAuthLogin forwards login requests to AiAgenz
 func proxyAuthLogin(c *fiber.Ctx) error {
-	proxyURL := "http://localhost:4001/api/auth/login"
+	proxyURL := "http://172.17.0.1:4001/api/auth/login"
 
 	req, err := http.NewRequest("POST", proxyURL, bytes.NewReader(c.Body()))
 	if err != nil {
@@ -710,7 +710,7 @@ func proxyAuthMe(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized: Missing authentication cookie"})
 	}
 
-	proxyURL := "http://localhost:4001/api/auth/me"
+	proxyURL := "http://172.17.0.1:4001/api/auth/me"
 
 	req, err := http.NewRequest("GET", proxyURL, nil)
 	if err != nil {

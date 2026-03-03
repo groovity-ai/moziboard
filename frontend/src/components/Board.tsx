@@ -44,6 +44,7 @@ const defaultLists = [
   { id: 'backlog', title: 'Backlog', tasks: [] },
   { id: 'todo', title: 'To Do', tasks: [] },
   { id: 'doing', title: 'In Progress', tasks: [] },
+  { id: 'qa', title: 'QA / Review', tasks: [] },
   { id: 'done', title: 'Done', tasks: [] },
 ];
 

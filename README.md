@@ -59,6 +59,38 @@ Integration with system monitoring tools to automatically capture and report err
 ### 4. 🧠 Semantic Search
 Tasks are automatically embedded using Gemini/OpenAI models upon creation or update. This allows users to search for tasks by meaning rather than just keywords.
 
+### 5. 🔌 MCP Server (Claude Desktop / OpenClaw)
+MoziBoard provides a Model Context Protocol (MCP) server for direct integration with AI clients.
+
+- **Location**: `mcp-server/`
+- **Transport**: HTTP SSE (Server-Sent Events)
+- **Port**: 3005
+
+**Setup:**
+1. Create `.env` in `mcp-server/` with a secret key:
+   ```bash
+   MCP_API_KEY=your-secret-key-here
+   ```
+2. Start the server:
+   ```bash
+   cd mcp-server && npm install && npm run build
+   node --env-file=.env dist/index.js
+   ```
+
+**Claude Desktop Config (`claude_desktop_config.json`):**
+```json
+{
+  "mcpServers": {
+    "moziboard": {
+      "url": "http://localhost:3005/sse",
+      "headers": {
+        "Authorization": "Bearer your-secret-key-here"
+      }
+    }
+  }
+}
+```
+
 ## 🚀 Getting Started
 
 ### Prerequisites
@@ -104,6 +136,7 @@ Tasks are automatically embedded using Gemini/OpenAI models upon creation or upd
 - [x] **Activity Logs**: History tracking with `updated_by` attribution.
 - [x] **Agent Dispatcher**: Automated task pickup by agents.
 - [x] **Auto-Bug Reporting**: Log-to-Task integration.
+- [x] **MCP Server**: Standard interface for AI models.
 - [ ] **Auto-Subtasks**: AI automatically breaks down large tasks.
 - [ ] **Real-time**: WebSocket integration for live updates (In Progress).
 
