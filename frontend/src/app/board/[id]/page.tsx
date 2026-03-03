@@ -5,7 +5,13 @@ import { Board } from '@/components/Board';
 import { KnowledgeBase } from '@/components/KnowledgeBase';
 import { MemberManager } from '@/components/MemberManager';
 import { useState } from 'react';
-import { Users, Layout, FileText } from 'lucide-react';
+import { Users, Layout, FileText, Bot } from 'lucide-react';
+import { SidebarTrigger } from '@/components/ui/sidebar';
+import {
+  ResizablePanelGroup,
+  ResizablePanel,
+  ResizableHandle,
+} from "@/components/ui/resizable";
 
 type TabType = 'kanban' | 'docs';
 
@@ -16,22 +22,20 @@ export default function BoardPage() {
   const [activeTab, setActiveTab] = useState<TabType>('kanban');
 
   return (
-    <main className="flex h-screen w-screen flex-col bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-gray-100">
-      <div className="flex items-center justify-between border-b bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-        <div className="flex items-center gap-4">
-          <h1 className="text-xl font-bold tracking-tight">
-            <a href="/" className="hover:text-rose-500">Moziboard</a>
-            <span className="mx-2 text-gray-400">/</span>
-            Project
+    <div className="flex flex-col h-full w-full">
+      <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b px-4">
+        <div className="flex items-center gap-2">
+          <SidebarTrigger />
+          <h1 className="text-lg font-bold tracking-tight px-2">
+            Sprint Workspace
           </h1>
-
           {/* Tab Navigation */}
-          <div className="flex items-center gap-1 rounded-lg bg-gray-100 p-1 dark:bg-zinc-800">
+          <div className="flex items-center gap-1 rounded-lg bg-gray-100 p-1 dark:bg-zinc-800 ml-4">
             <button
               onClick={() => setActiveTab('kanban')}
-              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${activeTab === 'kanban'
-                  ? 'bg-white text-gray-900 shadow-sm dark:bg-zinc-700 dark:text-white'
-                  : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+              className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-sm font-medium transition-colors ${activeTab === 'kanban'
+                ? 'bg-white text-gray-900 shadow-sm dark:bg-zinc-700 dark:text-white'
+                : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
                 }`}
             >
               <Layout size={14} />
@@ -39,33 +43,60 @@ export default function BoardPage() {
             </button>
             <button
               onClick={() => setActiveTab('docs')}
-              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${activeTab === 'docs'
-                  ? 'bg-white text-gray-900 shadow-sm dark:bg-zinc-700 dark:text-white'
-                  : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+              className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-sm font-medium transition-colors ${activeTab === 'docs'
+                ? 'bg-white text-gray-900 shadow-sm dark:bg-zinc-700 dark:text-white'
+                : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
                 }`}
             >
               <FileText size={14} />
-              Knowledge Base
+              Docs
             </button>
           </div>
         </div>
-
         <div className="flex gap-2">
           <button
             onClick={() => setShowMembers(true)}
-            className="flex items-center gap-2 rounded-lg bg-gray-100 px-3 py-2 text-sm font-medium hover:bg-gray-200 dark:bg-zinc-800 dark:hover:bg-zinc-700"
+            className="flex items-center gap-2 rounded-lg bg-gray-100 px-3 py-1.5 text-sm font-medium hover:bg-gray-200 dark:bg-zinc-800 dark:hover:bg-zinc-700"
           >
             <Users size={16} /> Members
           </button>
         </div>
-      </div>
+      </header>
 
       <div className="flex-1 overflow-hidden">
-        {activeTab === 'kanban' ? (
-          <Board boardId={id} />
-        ) : (
-          <KnowledgeBase boardId={id} />
-        )}
+        <ResizablePanelGroup orientation="horizontal" className="h-full">
+          {/* Agents / Quick Filters Panel */}
+          <ResizablePanel
+            defaultSize={15}
+            minSize={10}
+            maxSize={20}
+            collapsible
+            collapsedSize={4}
+            className="hidden md:block bg-zinc-50/50 dark:bg-zinc-900/20"
+          >
+            <div className="p-4 flex flex-col h-full">
+              <h3 className="font-semibold text-sm text-gray-500 flex items-center gap-2 mb-4">
+                <Bot size={16} /> Active Agents
+              </h3>
+              <div className="text-sm text-gray-400 italic">
+                Agents assigned to this board will appear here.
+              </div>
+            </div>
+          </ResizablePanel>
+
+          <ResizableHandle className="hover:bg-rose-500/50 w-[2px] bg-border transition-colors focus-visible:ring-0 focus-visible:ring-offset-0 hidden md:flex" />
+
+          {/* Main Content */}
+          <ResizablePanel minSize={50}>
+            <div className="h-full w-full overflow-hidden">
+              {activeTab === 'kanban' ? (
+                <Board boardId={id} />
+              ) : (
+                <KnowledgeBase boardId={id} />
+              )}
+            </div>
+          </ResizablePanel>
+        </ResizablePanelGroup>
       </div>
 
       <MemberManager
@@ -73,6 +104,6 @@ export default function BoardPage() {
         isOpen={showMembers}
         onClose={() => setShowMembers(false)}
       />
-    </main>
+    </div>
   );
 }

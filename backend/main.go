@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"sync"
 	"time"
@@ -29,9 +30,10 @@ var (
 )
 
 type Board struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
+	ID          string  `json:"id"`
+	UserID      *string `json:"user_id"`
+	Title       string  `json:"title"`
+	Description string  `json:"description"`
 }
 
 type Task struct {
@@ -42,7 +44,30 @@ type Task struct {
 	ListID      string  `json:"list_id"`
 	Position    int     `json:"position"`
 	AssigneeID  *string `json:"assignee_id"`
+	ParentID    *int    `json:"parent_id,omitempty"`
 	UpdatedBy   string  `json:"updated_by,omitempty"`
+}
+
+type Agent struct {
+	ID           string    `json:"id"`
+	Soul         string    `json:"soul"`
+	Memory       string    `json:"memory"`
+	Rules        string    `json:"rules"`
+	CronSchedule string    `json:"cron_schedule"`
+	Active       bool      `json:"active"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type Deliverable struct {
+	ID           int       `json:"id"`
+	TaskID       int       `json:"task_id"`
+	Title        string    `json:"title"`
+	Description  string    `json:"description"`
+	ArtifactType string    `json:"artifact_type"`
+	Content      string    `json:"content"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type Member struct {
@@ -117,10 +142,12 @@ func initDB() {
 	db.Exec(context.Background(), `
 	CREATE TABLE IF NOT EXISTS boards (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		user_id TEXT,
 		title TEXT NOT NULL,
 		description TEXT,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);`)
+	db.Exec(context.Background(), "ALTER TABLE boards ADD COLUMN IF NOT EXISTS user_id TEXT")
 
 	var defaultBoardID string
 	err = db.QueryRow(context.Background(), "SELECT id::text FROM boards WHERE title='Main Project' LIMIT 1").Scan(&defaultBoardID)
@@ -148,6 +175,18 @@ func initDB() {
 	);`)
 
 	db.Exec(context.Background(), `
+	CREATE TABLE IF NOT EXISTS agents (
+		id TEXT PRIMARY KEY REFERENCES members(id) ON DELETE CASCADE,
+		soul TEXT DEFAULT '',
+		memory TEXT DEFAULT '',
+		rules TEXT DEFAULT '',
+		cron_schedule TEXT DEFAULT '*/10 * * * *',
+		active BOOLEAN DEFAULT true,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);`)
+
+	db.Exec(context.Background(), `
 	CREATE TABLE IF NOT EXISTS tasks (
 		id SERIAL PRIMARY KEY,
 		board_id UUID NOT NULL,
@@ -156,7 +195,22 @@ func initDB() {
 		list_id TEXT NOT NULL,
 		position INT DEFAULT 0,
 		assignee_id TEXT REFERENCES members(id),
+		parent_id INT REFERENCES tasks(id) ON DELETE CASCADE,
 		CONSTRAINT fk_board FOREIGN KEY(board_id) REFERENCES boards(id) ON DELETE CASCADE
+	);`)
+	db.Exec(context.Background(), "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS parent_id INT REFERENCES tasks(id) ON DELETE CASCADE")
+
+	db.Exec(context.Background(), `
+	CREATE TABLE IF NOT EXISTS deliverables (
+		id SERIAL PRIMARY KEY,
+		task_id INT NOT NULL,
+		title TEXT NOT NULL,
+		description TEXT,
+		artifact_type TEXT,
+		content TEXT,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		CONSTRAINT fk_dev_task FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
 	);`)
 
 	db.Exec(context.Background(), `
@@ -213,6 +267,12 @@ func seedMembers() {
 		db.Exec(context.Background(),
 			"INSERT INTO members (id, name, role, avatar) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO UPDATE SET name=$2, role=$3, avatar=$4",
 			m.ID, m.Name, m.Role, m.Avatar)
+
+		if m.Role == "agent" {
+			db.Exec(context.Background(),
+				"INSERT INTO agents (id, soul, memory, rules, cron_schedule) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING",
+				m.ID, "You are a helpful AI assistant in a software squad.", "No memories yet.", "Be concise.", "*/1 * * * *")
+		}
 	}
 }
 
@@ -313,6 +373,8 @@ func main() {
 
 	rdb = redis.NewClient(&redis.Options{Addr: os.Getenv("REDIS_ADDR"), Password: os.Getenv("REDIS_PASSWORD"), DB: 0})
 
+	go startDispatcher()
+
 	app := fiber.New()
 	app.Use(cors.New(cors.Config{AllowOrigins: "*", AllowHeaders: "Origin, Content-Type, Accept"}))
 
@@ -348,8 +410,17 @@ func main() {
 	app.Post("/api/tasks", createTask)
 	app.Put("/api/tasks/:id", updateTask)
 	app.Get("/api/tasks/:id/activities", getTaskActivities)
+	app.Get("/api/tasks/:id/deliverables", getTaskDeliverables)
+	app.Post("/api/tasks/:id/deliverables", createDeliverable)
 	app.Get("/api/search", searchTasks)
 	app.Get("/api/members", getMembers)
+	app.Get("/api/agents/:id", getAgentProfile)
+	app.Get("/api/agents", getAgents)
+	app.Get("/api/agents/sync/aiagenz", getAiAgenzProjects)
+
+	// Auth Proxies
+	app.Post("/api/auth/login", proxyAuthLogin)
+	app.Get("/api/auth/me", proxyAuthMe)
 
 	// Knowledge Base / Documents
 	app.Get("/api/boards/:id/docs", getBoardDocs)
@@ -365,8 +436,95 @@ func main() {
 	log.Fatal(app.Listen(":8080"))
 }
 
+// --- Agent Dispatcher ---
+
+func startDispatcher() {
+	log.Println("Starting Go native agent dispatcher...")
+
+	// Run polling as a background goroutine
+	go func() {
+		// Check immediately at startup
+		pollAgentTasks()
+
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			pollAgentTasks()
+		}
+	}()
+}
+
+func pollAgentTasks() {
+	query := `
+		SELECT t.id, t.board_id::text, t.title, t.description, t.assignee_id 
+		FROM tasks t
+		JOIN members m ON t.assignee_id = m.id
+		WHERE lower(t.list_id) = 'todo' AND m.role = 'agent'
+	`
+	rows, err := db.Query(context.Background(), query)
+	if err != nil {
+		log.Printf("Dispatcher check error: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	var pendingTasks []Task
+	for rows.Next() {
+		var t Task
+		if err := rows.Scan(&t.ID, &t.BoardID, &t.Title, &t.Description, &t.AssigneeID); err != nil {
+			log.Printf("Dispatcher scan error: %v", err)
+			continue
+		}
+		pendingTasks = append(pendingTasks, t)
+	}
+
+	if len(pendingTasks) > 0 {
+		log.Printf("Found %d pending agent tasks to process.", len(pendingTasks))
+		for _, t := range pendingTasks {
+			go processAgentTask(t)
+		}
+	}
+}
+
+func processAgentTask(t Task) {
+	if t.AssigneeID == nil {
+		return
+	}
+	agentName := *t.AssigneeID
+	log.Printf("Spawning session for %s to work on task %d...", agentName, t.ID)
+
+	// Mark as doing
+	_, err := db.Exec(context.Background(),
+		"UPDATE tasks SET list_id=$1, updated_by=$2 WHERE id=$3",
+		"doing", agentName, t.ID)
+	if err != nil {
+		log.Printf("Dispatcher failed to mark task %d doing: %v", t.ID, err)
+		return
+	}
+
+	go logActivity(t.ID, agentName, "moved", "Moved to list doing (Auto-dispatched)")
+	go broadcastUpdate("UPDATE")
+
+	taskContent := fmt.Sprintf("MoziBoard Task %d: %s\n%s", t.ID, t.Title, t.Description)
+
+	var cmd *exec.Cmd
+	if agentName == "kodinger" || agentName == "mochi" {
+		cmd = exec.Command("openclaw", "agent", "--profile", agentName, "--agent", agentName, "--message", taskContent)
+	} else {
+		cmd = exec.Command("openclaw", "agent", "--agent", agentName, "--message", taskContent)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("OpenClaw error for agent %s on task %d: %v\nOutput: %s", agentName, t.ID, err, string(output))
+	} else {
+		log.Printf("OpenClaw finished for agent %s on task %d.\nOutput: %s", agentName, t.ID, string(output))
+	}
+}
+
 func getBoards(c *fiber.Ctx) error {
-	rows, err := db.Query(context.Background(), "SELECT id::text, title, description FROM boards ORDER BY created_at ASC")
+	rows, err := db.Query(context.Background(), "SELECT id::text, user_id, title, description FROM boards ORDER BY created_at ASC")
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
@@ -374,7 +532,7 @@ func getBoards(c *fiber.Ctx) error {
 	var boards []Board
 	for rows.Next() {
 		var b Board
-		if err := rows.Scan(&b.ID, &b.Title, &b.Description); err != nil {
+		if err := rows.Scan(&b.ID, &b.UserID, &b.Title, &b.Description); err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
 		boards = append(boards, b)
@@ -390,17 +548,22 @@ func createBoard(c *fiber.Ctx) error {
 	if err := c.BodyParser(b); err != nil {
 		return c.Status(400).SendString(err.Error())
 	}
-	err := db.QueryRow(context.Background(), "INSERT INTO boards (title, description) VALUES ($1, $2) RETURNING id::text", b.Title, b.Description).Scan(&b.ID)
+	err := db.QueryRow(context.Background(), "INSERT INTO boards (user_id, title, description) VALUES ($1, $2, $3) RETURNING id::text", b.UserID, b.Title, b.Description).Scan(&b.ID)
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
-	db.Exec(context.Background(), "INSERT INTO board_members (board_id, member_id, role) VALUES ($1, 'mirza', 'owner')", b.ID)
+	if b.UserID != nil && *b.UserID != "" {
+		db.Exec(context.Background(), "INSERT INTO board_members (board_id, member_id, role) VALUES ($1, $2, 'owner')", b.ID, *b.UserID)
+	} else {
+		// Fallback for anonymous creations
+		db.Exec(context.Background(), "INSERT INTO board_members (board_id, member_id, role) VALUES ($1, 'system', 'owner')", b.ID)
+	}
 	return c.JSON(b)
 }
 
 func getBoardTasks(c *fiber.Ctx) error {
 	boardID := c.Params("id")
-	rows, err := db.Query(context.Background(), "SELECT id, board_id::text, title, description, list_id, position, assignee_id FROM tasks WHERE board_id=$1 ORDER BY position ASC", boardID)
+	rows, err := db.Query(context.Background(), "SELECT id, board_id::text, title, description, list_id, position, assignee_id, parent_id FROM tasks WHERE board_id=$1 ORDER BY position ASC", boardID)
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
@@ -408,7 +571,7 @@ func getBoardTasks(c *fiber.Ctx) error {
 	var tasks []Task
 	for rows.Next() {
 		var t Task
-		if err := rows.Scan(&t.ID, &t.BoardID, &t.Title, &t.Description, &t.ListID, &t.Position, &t.AssigneeID); err != nil {
+		if err := rows.Scan(&t.ID, &t.BoardID, &t.Title, &t.Description, &t.ListID, &t.Position, &t.AssigneeID, &t.ParentID); err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
 		tasks = append(tasks, t)
@@ -437,6 +600,138 @@ func getMembers(c *fiber.Ctx) error {
 		members = []Member{}
 	}
 	return c.JSON(members)
+}
+
+func getAgents(c *fiber.Ctx) error {
+	rows, err := db.Query(context.Background(), "SELECT id, soul, memory, rules, cron_schedule, active, created_at, updated_at FROM agents")
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+	defer rows.Close()
+	var agents []Agent
+	for rows.Next() {
+		var a Agent
+		if err := rows.Scan(&a.ID, &a.Soul, &a.Memory, &a.Rules, &a.CronSchedule, &a.Active, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+		agents = append(agents, a)
+	}
+	if agents == nil {
+		agents = []Agent{}
+	}
+	return c.JSON(agents)
+}
+
+func getAgentProfile(c *fiber.Ctx) error {
+	agentID := c.Params("id")
+	var a Agent
+	err := db.QueryRow(context.Background(),
+		"SELECT id, soul, memory, rules, cron_schedule, active, created_at, updated_at FROM agents WHERE id=$1",
+		agentID).Scan(&a.ID, &a.Soul, &a.Memory, &a.Rules, &a.CronSchedule, &a.Active, &a.CreatedAt, &a.UpdatedAt)
+	if err != nil {
+		return c.Status(404).SendString("Agent not found")
+	}
+	return c.JSON(a)
+}
+
+// getAiAgenzProjects proxies a request to the main AiAgenz backend to fetch the user's projects (agents).
+func getAiAgenzProjects(c *fiber.Ctx) error {
+	// The user needs to pass their session cookie or bearer token from the frontend.
+	// We'll forward the entire Cookie header to the AiAgenz API.
+	authCookie := c.Get("Cookie")
+	if authCookie == "" {
+		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized: Missing authentication cookie"})
+	}
+
+	// Assuming the AiAgenz backend is running on localhost:4001
+	proxyURL := "http://localhost:4001/api/projects"
+
+	req, err := http.NewRequest("GET", proxyURL, nil)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Failed to create proxy request"})
+	}
+
+	req.Header.Set("Cookie", authCookie)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return c.Status(502).JSON(fiber.Map{"error": "Failed to connect to AiAgenz backend: " + err.Error()})
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return c.Status(resp.StatusCode).JSON(fiber.Map{"error": "AiAgenz API returned an error status: " + resp.Status})
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Failed to parse AiAgenz response"})
+	}
+
+	return c.JSON(data)
+}
+
+// proxyAuthLogin forwards login requests to AiAgenz
+func proxyAuthLogin(c *fiber.Ctx) error {
+	proxyURL := "http://localhost:4001/api/auth/login"
+
+	req, err := http.NewRequest("POST", proxyURL, bytes.NewReader(c.Body()))
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Failed to create proxy request"})
+	}
+
+	req.Header.Set("Content-Type", c.Get("Content-Type"))
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return c.Status(502).JSON(fiber.Map{"error": "Failed to connect to AiAgenz backend: " + err.Error()})
+	}
+	defer resp.Body.Close()
+
+	// Forward the Set-Cookie header so the frontend gets the session
+	for _, cookie := range resp.Header["Set-Cookie"] {
+		c.Append("Set-Cookie", cookie)
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Failed to parse AiAgenz response"})
+	}
+
+	return c.Status(resp.StatusCode).JSON(data)
+}
+
+// proxyAuthMe forwards me asks to AiAgenz to check session validity
+func proxyAuthMe(c *fiber.Ctx) error {
+	authCookie := c.Get("Cookie")
+	if authCookie == "" {
+		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized: Missing authentication cookie"})
+	}
+
+	proxyURL := "http://localhost:4001/api/auth/me"
+
+	req, err := http.NewRequest("GET", proxyURL, nil)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Failed to create proxy request"})
+	}
+
+	req.Header.Set("Cookie", authCookie)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return c.Status(502).JSON(fiber.Map{"error": "Failed to connect to AiAgenz backend: " + err.Error()})
+	}
+	defer resp.Body.Close()
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Failed to parse AiAgenz response"})
+	}
+
+	return c.Status(resp.StatusCode).JSON(data)
 }
 
 func getBoardMembers(c *fiber.Ctx) error {
@@ -521,8 +816,8 @@ func createTask(c *fiber.Ctx) error {
 
 	var id int
 	err := db.QueryRow(context.Background(),
-		"INSERT INTO tasks (board_id, title, description, list_id, position, assignee_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
-		t.BoardID, t.Title, t.Description, t.ListID, t.Position, t.AssigneeID).Scan(&id)
+		"INSERT INTO tasks (board_id, title, description, list_id, position, assignee_id, parent_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+		t.BoardID, t.Title, t.Description, t.ListID, t.Position, t.AssigneeID, t.ParentID).Scan(&id)
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
@@ -537,8 +832,8 @@ func updateTask(c *fiber.Ctx) error {
 
 	var oldTask Task
 	err := db.QueryRow(context.Background(),
-		"SELECT id, board_id::text, title, description, list_id, position, assignee_id FROM tasks WHERE id=$1",
-		id).Scan(&oldTask.ID, &oldTask.BoardID, &oldTask.Title, &oldTask.Description, &oldTask.ListID, &oldTask.Position, &oldTask.AssigneeID)
+		"SELECT id, board_id::text, title, description, list_id, position, assignee_id, parent_id FROM tasks WHERE id=$1",
+		id).Scan(&oldTask.ID, &oldTask.BoardID, &oldTask.Title, &oldTask.Description, &oldTask.ListID, &oldTask.Position, &oldTask.AssigneeID, &oldTask.ParentID)
 	if err != nil {
 		return c.Status(404).SendString("Task not found")
 	}
@@ -571,14 +866,18 @@ func updateTask(c *fiber.Ctx) error {
 	// To truly distinguish "unset" vs "empty", we'd need pointer fields.
 	// For MVP, if Title is empty, assume we keep old one.
 
+	if newTask.ParentID == nil {
+		newTask.ParentID = oldTask.ParentID
+	}
+
 	_, err = db.Exec(context.Background(),
-		"UPDATE tasks SET title=$1, description=$2, list_id=$3, position=$4, assignee_id=$5, board_id=$6 WHERE id=$7",
-		newTask.Title, newTask.Description, newTask.ListID, newTask.Position, newTask.AssigneeID, newTask.BoardID, id)
+		"UPDATE tasks SET title=$1, description=$2, list_id=$3, position=$4, assignee_id=$5, board_id=$6, parent_id=$7 WHERE id=$8",
+		newTask.Title, newTask.Description, newTask.ListID, newTask.Position, newTask.AssigneeID, newTask.BoardID, newTask.ParentID, id)
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
 
-	userID := "mirza" // Default
+	userID := "system" // Default
 	if newTask.UpdatedBy != "" {
 		userID = newTask.UpdatedBy
 	}
@@ -663,7 +962,7 @@ func searchTasks(c *fiber.Ctx) error {
 		return c.Status(500).SendString(err.Error())
 	}
 	rows, err := db.Query(context.Background(),
-		"SELECT id, board_id::text, title, description, list_id, position, assignee_id FROM tasks ORDER BY embedding <=> $1 LIMIT 5",
+		"SELECT id, board_id::text, title, description, list_id, position, assignee_id, parent_id FROM tasks ORDER BY embedding <=> $1 LIMIT 5",
 		pgvector(emb))
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
@@ -672,7 +971,7 @@ func searchTasks(c *fiber.Ctx) error {
 	var tasks []Task
 	for rows.Next() {
 		var t Task
-		if err := rows.Scan(&t.ID, &t.BoardID, &t.Title, &t.Description, &t.ListID, &t.Position, &t.AssigneeID); err != nil {
+		if err := rows.Scan(&t.ID, &t.BoardID, &t.Title, &t.Description, &t.ListID, &t.Position, &t.AssigneeID, &t.ParentID); err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
 		tasks = append(tasks, t)
@@ -879,4 +1178,44 @@ func createComment(c *fiber.Ctx) error {
 	cm.TaskID = taskID
 	cm.CreatedAt = createdAt
 	return c.JSON(cm)
+}
+
+func getTaskDeliverables(c *fiber.Ctx) error {
+	taskID := c.Params("id")
+	rows, err := db.Query(context.Background(), "SELECT id, task_id, title, description, artifact_type, content, created_at, updated_at FROM deliverables WHERE task_id=$1 ORDER BY created_at DESC", taskID)
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+	defer rows.Close()
+	var deliverables []Deliverable
+	for rows.Next() {
+		var d Deliverable
+		if err := rows.Scan(&d.ID, &d.TaskID, &d.Title, &d.Description, &d.ArtifactType, &d.Content, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+		deliverables = append(deliverables, d)
+	}
+	if deliverables == nil {
+		deliverables = []Deliverable{}
+	}
+	return c.JSON(deliverables)
+}
+
+func createDeliverable(c *fiber.Ctx) error {
+	taskID, _ := strconv.Atoi(c.Params("id"))
+	d := new(Deliverable)
+	if err := c.BodyParser(d); err != nil {
+		return c.Status(400).SendString(err.Error())
+	}
+	d.TaskID = taskID
+
+	err := db.QueryRow(context.Background(),
+		"INSERT INTO deliverables (task_id, title, description, artifact_type, content) VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at, updated_at",
+		d.TaskID, d.Title, d.Description, d.ArtifactType, d.Content).Scan(&d.ID, &d.CreatedAt, &d.UpdatedAt)
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+
+	go logActivity(taskID, "system", "created_deliverable", fmt.Sprintf("Generated deliverable: %s", d.Title))
+	return c.JSON(d)
 }

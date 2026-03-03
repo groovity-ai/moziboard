@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { Task } from './Board';
 import { X, Send, User, MessageCircle } from 'lucide-react';
 import useSWR, { mutate } from 'swr';
+import { RichTextEditor } from './ui/rich-text-editor';
 
 interface Activity {
   id: number;
@@ -10,6 +11,17 @@ interface Activity {
   action: string;
   details: string;
   created_at: string;
+}
+
+interface Deliverable {
+  id: number;
+  task_id: number;
+  title: string;
+  description: string;
+  artifact_type: string;
+  content: string;
+  created_at: string;
+  updated_at: string;
 }
 
 interface Comment {
@@ -40,18 +52,26 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
   const [commentInput, setCommentInput] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [assigneeId, setAssigneeId] = useState(task.assignee_id || '');
+  const [boardId, setBoardId] = useState(task.board_id || '');
   const [activeTab, setActiveTab] = useState<'details' | 'discussion'>('discussion');
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  const { data: boards } = useSWR<any[]>('/api/boards', fetcher);
+
   const { data: members } = useSWR<Member[]>(task.board_id ? `/api/boards/${task.board_id}/members` : null, fetcher);
   const { data: activities } = useSWR<Activity[]>(task.id ? `/api/tasks/${task.id}/activities` : null, fetcher);
+  const { data: deliverables } = useSWR<Deliverable[]>(task.id ? `/api/tasks/${task.id}/deliverables` : null, fetcher);
   const { data: comments } = useSWR<Comment[]>(task.id ? `/api/tasks/${task.id}/comments` : null, fetcher, {
     refreshInterval: 5000,
   });
 
+  // Fetch current user
+  const { data: session } = useSWR<{ id: string }>('/api/auth/me', fetcher);
+
   useEffect(() => {
     setDescription(task.description || '');
     setAssigneeId(task.assignee_id || '');
+    setBoardId(task.board_id || '');
   }, [task]);
 
   useEffect(() => {
@@ -68,9 +88,12 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
     await fetch(`/api/tasks/${task.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...task, description, assignee_id: assigneeId || null }),
+      body: JSON.stringify({ ...task, description, assignee_id: assigneeId || null, board_id: boardId }),
     });
     mutate(`/api/boards/${task.board_id}/tasks`);
+    if (boardId !== task.board_id) {
+      mutate(`/api/boards/${boardId}/tasks`);
+    }
     onClose();
   };
 
@@ -81,7 +104,7 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
       await fetch(`/api/tasks/${task.id}/comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: 'mirza', content: commentInput.trim() }),
+        body: JSON.stringify({ user_id: session?.id || 'human_user', content: commentInput.trim() }),
       });
       setCommentInput('');
       mutate(`/api/tasks/${task.id}/comments`);
@@ -107,8 +130,8 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
           <button
             onClick={() => setActiveTab('discussion')}
             className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors ${activeTab === 'discussion'
-                ? 'border-b-2 border-rose-500 text-rose-500'
-                : 'text-gray-500 hover:text-gray-700 dark:text-gray-400'
+              ? 'border-b-2 border-rose-500 text-rose-500'
+              : 'text-gray-500 hover:text-gray-700 dark:text-gray-400'
               }`}
           >
             <MessageCircle size={14} />
@@ -122,8 +145,8 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
           <button
             onClick={() => setActiveTab('details')}
             className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors ${activeTab === 'details'
-                ? 'border-b-2 border-rose-500 text-rose-500'
-                : 'text-gray-500 hover:text-gray-700 dark:text-gray-400'
+              ? 'border-b-2 border-rose-500 text-rose-500'
+              : 'text-gray-500 hover:text-gray-700 dark:text-gray-400'
               }`}
           >
             <User size={14} />
@@ -152,15 +175,15 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
                     <div key={cm.id} className={`flex gap-3 ${isHuman ? 'flex-row-reverse' : ''}`}>
                       {/* Avatar */}
                       <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm ${isHuman
-                          ? 'bg-rose-100 dark:bg-rose-900/30'
-                          : 'bg-blue-100 dark:bg-blue-900/30'
+                        ? 'bg-rose-100 dark:bg-rose-900/30'
+                        : 'bg-blue-100 dark:bg-blue-900/30'
                         }`}>
                         {member?.avatar || '🤖'}
                       </div>
                       {/* Bubble */}
                       <div className={`max-w-[75%] rounded-2xl px-4 py-2.5 ${isHuman
-                          ? 'bg-rose-500 text-white'
-                          : 'bg-gray-100 text-gray-900 dark:bg-zinc-800 dark:text-gray-100'
+                        ? 'bg-rose-500 text-white'
+                        : 'bg-gray-100 text-gray-900 dark:bg-zinc-800 dark:text-gray-100'
                         }`}>
                         <div className={`mb-1 flex items-center gap-2 text-xs ${isHuman ? 'text-rose-200' : 'text-gray-500 dark:text-gray-400'
                           }`}>
@@ -211,13 +234,13 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
 
                 {/* Assignee Selector */}
                 <div className="flex items-center gap-4">
-                  <div className="flex items-center gap-2 text-sm font-medium text-gray-500">
+                  <div className="flex items-center gap-2 text-sm font-medium text-gray-500 min-w-[100px]">
                     <User size={16} /> Assignee:
                   </div>
                   <select
                     value={assigneeId}
                     onChange={(e) => setAssigneeId(e.target.value)}
-                    className="rounded-md border bg-transparent px-3 py-1 text-sm outline-none focus:border-rose-500 dark:border-zinc-700"
+                    className="flex-1 rounded-md border bg-transparent px-3 py-1.5 text-sm outline-none focus:border-rose-500 dark:border-zinc-700"
                   >
                     <option value="">Unassigned</option>
                     {members?.map((m) => (
@@ -228,14 +251,60 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
                   </select>
                 </div>
 
+                {/* Board Selector (Move Task) */}
+                <div className="flex items-center gap-4">
+                  <div className="flex items-center gap-2 text-sm font-medium text-gray-500 min-w-[100px]">
+                    Board:
+                  </div>
+                  <select
+                    value={boardId}
+                    onChange={(e) => setBoardId(e.target.value)}
+                    className="flex-1 rounded-md border bg-transparent px-3 py-1.5 text-sm outline-none focus:border-rose-500 dark:border-zinc-700"
+                  >
+                    {boards?.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.title}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
                 <div className="flex-1">
                   <label className="mb-2 block text-sm font-medium text-gray-500">Description / Context</label>
-                  <textarea
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
-                    className="h-full w-full min-h-[200px] resize-none rounded-xl border bg-gray-50 p-4 outline-none focus:ring-2 focus:ring-rose-500 dark:bg-zinc-800 dark:border-zinc-700"
-                    placeholder="Add details..."
-                  />
+                  <div className="min-h-[200px]">
+                    <RichTextEditor
+                      content={description}
+                      onChange={setDescription}
+                      placeholder="Add details..."
+                    />
+                  </div>
+                </div>
+
+                {/* Deliverables */}
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-gray-500">Deliverables</label>
+                  {deliverables && deliverables.length > 0 ? (
+                    <div className="space-y-3">
+                      {deliverables.map((d) => (
+                        <div key={d.id} className="rounded-xl border bg-gray-50 p-4 dark:bg-zinc-800 dark:border-zinc-700">
+                          <div className="font-semibold text-sm mb-1">{d.title}</div>
+                          <div className="text-xs text-gray-500 mb-2">{d.description}</div>
+                          {d.content && (
+                            <div className="mt-2 text-sm max-h-[200px] overflow-y-auto bg-white p-3 rounded border dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800">
+                              <pre className="whitespace-pre-wrap font-sans">{d.content}</pre>
+                            </div>
+                          )}
+                          <div className="text-[10px] text-gray-400 mt-3 text-right">
+                            {new Date(d.created_at).toLocaleString()}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-dashed p-6 text-center text-sm text-gray-400 dark:border-zinc-700">
+                      No deliverables generated yet.
+                    </div>
+                  )}
                 </div>
 
                 {/* Activity Log */}
