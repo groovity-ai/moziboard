@@ -1,13 +1,12 @@
 'use client';
 
 import { useParams } from 'next/navigation';
-import { Board } from '@/components/Board';
+import { Bot, Users } from 'lucide-react';
+import { SidebarTrigger } from '@/components/ui/sidebar';
 import { MemberManager } from '@/components/MemberManager';
 import { useState } from 'react';
-import { Users, Layout } from 'lucide-react';
-import { SidebarTrigger } from '@/components/ui/sidebar';
 
-export default function BoardPage() {
+export default function AgentsPage() {
   const params = useParams();
   const id = params.id as string;
   const [showMembers, setShowMembers] = useState(false);
@@ -18,8 +17,8 @@ export default function BoardPage() {
         <div className="flex items-center gap-2">
           <SidebarTrigger />
           <h1 className="text-lg font-bold tracking-tight px-2 flex items-center gap-2">
-            <Layout className="w-5 h-5 text-rose-500" />
-            Kanban Board
+            <Bot className="w-5 h-5 text-gray-500" />
+            Active Agents
           </h1>
         </div>
         <div className="flex gap-2">
@@ -32,9 +31,21 @@ export default function BoardPage() {
         </div>
       </header>
 
-      <div className="flex-1 overflow-hidden">
-        <div className="h-full w-full overflow-hidden">
-          <Board boardId={id} />
+      <div className="flex-1 overflow-auto p-6">
+        <div className="max-w-4xl mx-auto">
+          <div className="rounded-xl border bg-card text-card-foreground shadow-sm">
+            <div className="flex flex-col space-y-1.5 p-6">
+              <h3 className="font-semibold leading-none tracking-tight">Board Agents</h3>
+              <p className="text-sm text-muted-foreground">
+                Manage the AI agents assigned to this board.
+              </p>
+            </div>
+            <div className="p-6 pt-0">
+               <div className="text-sm text-gray-400 italic">
+                Agents assigned to this board will appear here. (Coming soon)
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 

@@ -1,13 +1,13 @@
 'use client';
 
 import { useParams } from 'next/navigation';
-import { Board } from '@/components/Board';
+import { KnowledgeBase } from '@/components/KnowledgeBase';
 import { MemberManager } from '@/components/MemberManager';
 import { useState } from 'react';
-import { Users, Layout } from 'lucide-react';
+import { Users, FileText } from 'lucide-react';
 import { SidebarTrigger } from '@/components/ui/sidebar';
 
-export default function BoardPage() {
+export default function DocsPage() {
   const params = useParams();
   const id = params.id as string;
   const [showMembers, setShowMembers] = useState(false);
@@ -18,8 +18,8 @@ export default function BoardPage() {
         <div className="flex items-center gap-2">
           <SidebarTrigger />
           <h1 className="text-lg font-bold tracking-tight px-2 flex items-center gap-2">
-            <Layout className="w-5 h-5 text-rose-500" />
-            Kanban Board
+            <FileText className="w-5 h-5 text-gray-400" />
+            Knowledge Base
           </h1>
         </div>
         <div className="flex gap-2">
@@ -32,10 +32,8 @@ export default function BoardPage() {
         </div>
       </header>
 
-      <div className="flex-1 overflow-hidden">
-        <div className="h-full w-full overflow-hidden">
-          <Board boardId={id} />
-        </div>
+      <div className="flex-1 overflow-hidden h-full">
+         <KnowledgeBase boardId={id} />
       </div>
 
       <MemberManager
