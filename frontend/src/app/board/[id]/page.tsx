@@ -68,13 +68,13 @@ export default function BoardPage() {
           {/* Agents / Quick Filters Panel */}
           <ResizablePanel
             defaultSize={15}
-            minSize={10}
-            maxSize={20}
-            collapsible
-            collapsedSize={4}
-            className="hidden md:block bg-zinc-50/50 dark:bg-zinc-900/20"
+            minSize={15}
+            maxSize={25}
+            collapsible={true}
+            collapsedSize={0}
+            className="hidden md:block bg-zinc-50/50 dark:bg-zinc-900/20 transition-all duration-300 ease-in-out"
           >
-            <div className="p-4 flex flex-col h-full">
+            <div className="p-4 flex flex-col h-full overflow-hidden">
               <h3 className="font-semibold text-sm text-gray-500 flex items-center gap-2 mb-4">
                 <Bot size={16} /> Active Agents
               </h3>
@@ -84,7 +84,7 @@ export default function BoardPage() {
             </div>
           </ResizablePanel>
 
-          <ResizableHandle className="hover:bg-rose-500/50 w-[2px] bg-border transition-colors focus-visible:ring-0 focus-visible:ring-offset-0 hidden md:flex" />
+          <ResizableHandle withHandle className="hover:bg-rose-500/50 w-[2px] bg-border transition-colors focus-visible:ring-0 focus-visible:ring-offset-0 hidden md:flex" />
 
           {/* Main Content */}
           <ResizablePanel minSize={50}>
