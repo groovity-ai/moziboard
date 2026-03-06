@@ -136,22 +136,63 @@ export function Board({ boardId }: BoardProps) {
 
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
-    if (!over) return;
+    if (!over) {
+      setActiveTask(null);
+      return;
+    }
+
     const activeId = active.id;
     const overId = over.id;
+    
+    // Don't do anything if dropping on itself
+    if (activeId === overId) {
+      setActiveTask(null);
+      return;
+    }
+
     let task = tasks?.find((t) => String(t.id) === String(activeId));
-    if (!task) return;
+    if (!task) {
+      setActiveTask(null);
+      return;
+    }
 
     let newListId = task.list_id;
+    
+    // Check if over a list container
     if (defaultLists.some(l => l.id === overId)) {
       newListId = overId as string;
     } else {
+      // Check if over another task
       const overTask = tasks?.find(t => String(t.id) === String(overId));
-      if (overTask) newListId = overTask.list_id;
+      if (overTask) {
+        newListId = overTask.list_id;
+      }
     }
 
     if (task.list_id !== newListId) {
-      await updateTask({ ...task, list_id: newListId });
+      // OPTIMISTIC UPDATE UI IMMEDIATELY
+      const updatedTask = { ...task, list_id: newListId };
+      
+      // Update local state immediately to prevent jumping
+      mutate(
+        `/api/boards/${boardId}/tasks`,
+        (currentTasks: Task[] | undefined) => {
+          if (!currentTasks) return [];
+          return currentTasks.map(t => 
+            String(t.id) === String(activeId) ? updatedTask : t
+          );
+        },
+        false // Do not revalidate immediately
+      );
+      
+      // Trigger background API call
+      try {
+        await updateTask(updatedTask);
+        // Will re-fetch real data when WS update arrives
+      } catch (err) {
+        // Rollback on error
+        mutate(`/api/boards/${boardId}/tasks`);
+      }
     }
     setActiveTask(null);
   };
