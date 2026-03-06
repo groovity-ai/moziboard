@@ -67,15 +67,15 @@ export default function BoardPage() {
         <ResizablePanelGroup orientation="horizontal" className="h-full">
           {/* Agents / Quick Filters Panel */}
           <ResizablePanel
-            defaultSize={15}
+            defaultSize={20}
             minSize={15}
-            maxSize={25}
+            maxSize={35}
             collapsible={true}
             collapsedSize={0}
             className="hidden md:block bg-zinc-50/50 dark:bg-zinc-900/20 transition-all duration-300 ease-in-out"
           >
-            <div className="p-4 flex flex-col h-full overflow-hidden">
-              <h3 className="font-semibold text-sm text-gray-500 flex items-center gap-2 mb-4">
+            <div className="p-4 flex flex-col h-full min-w-[220px]">
+              <h3 className="font-semibold text-sm text-gray-500 flex items-center gap-2 mb-4 whitespace-nowrap">
                 <Bot size={16} /> Active Agents
               </h3>
               <div className="text-sm text-gray-400 italic">
