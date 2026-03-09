@@ -1255,6 +1255,13 @@ func runtimeTaskReviewRequest(c *fiber.Ctx) error {
 }
 
 func deliverPendingAgentEvents() {
+	_, _ = db.Exec(context.Background(), `
+		UPDATE agent_events
+		SET delivery_status='pending', response_status='processing_timeout_requeued'
+		WHERE delivery_status='processing'
+		  AND processed_at IS NULL
+		  AND last_delivery_at < CURRENT_TIMESTAMP - INTERVAL '60 seconds'`)
+
 	rows, err := db.Query(context.Background(), `
 		WITH claimed AS (
 			SELECT id
@@ -1285,6 +1292,11 @@ func deliverPendingAgentEvents() {
 		case deliverySemaphore <- struct{}{}:
 			go func(ev AgentEvent) {
 				defer func() { <-deliverySemaphore }()
+				defer func() {
+					if r := recover(); r != nil {
+						_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status=$2, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, fmt.Sprintf("panic:%v", r))
+					}
+				}()
 				processAgentEventDelivery(ev)
 			}(ev)
 		default:
