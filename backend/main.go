@@ -458,6 +458,8 @@ func initDB() {
 	db.Exec(context.Background(), "ALTER TABLE agent_connectors ADD COLUMN IF NOT EXISTS transport_mode TEXT DEFAULT 'internal'")
 	db.Exec(context.Background(), "ALTER TABLE agent_connectors ADD COLUMN IF NOT EXISTS base_url TEXT DEFAULT ''")
 	db.Exec(context.Background(), "ALTER TABLE agent_connectors ADD COLUMN IF NOT EXISTS agent_ref TEXT DEFAULT ''")
+	db.Exec(context.Background(), "ALTER TABLE agent_connectors ADD COLUMN IF NOT EXISTS is_primary BOOLEAN DEFAULT false")
+	db.Exec(context.Background(), "ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMP NULL")
 
 	db.Exec(context.Background(), `
 	CREATE TABLE IF NOT EXISTS board_agents (
@@ -488,6 +490,7 @@ func initDB() {
 		payload_json JSONB NOT NULL,
 		delivery_status TEXT DEFAULT 'pending',
 		delivery_attempts INT DEFAULT 0,
+		next_attempt_at TIMESTAMP NULL,
 		last_delivery_at TIMESTAMP NULL,
 		response_status TEXT DEFAULT '',
 		response_body TEXT DEFAULT '',
@@ -813,7 +816,12 @@ func createNotification(taskID *int, targetAgentID string, sourceAgentID *string
 
 func getConnectorForAgent(agentID string) (*AgentConnector, error) {
 	var conn AgentConnector
-	err := db.QueryRow(context.Background(), `SELECT id, agent_id, connector_type, transport_mode, auth_type, endpoint_url, base_url, agent_ref, session_key, status, metadata_json::text, last_success_at, last_error, created_at, updated_at FROM agent_connectors WHERE agent_id=$1 ORDER BY updated_at DESC, id DESC LIMIT 1`, agentID).
+	err := db.QueryRow(context.Background(), `
+		SELECT id, agent_id, connector_type, transport_mode, auth_type, endpoint_url, base_url, agent_ref, session_key, status, metadata_json::text, last_success_at, last_error, created_at, updated_at
+		FROM agent_connectors
+		WHERE agent_id=$1 AND status='connected'
+		ORDER BY is_primary DESC, updated_at DESC, id DESC
+		LIMIT 1`, agentID).
 		Scan(&conn.ID, &conn.AgentID, &conn.ConnectorType, &conn.TransportMode, &conn.AuthType, &conn.EndpointURL, &conn.BaseURL, &conn.AgentRef, &conn.SessionKey, &conn.Status, &conn.MetadataJSON, &conn.LastSuccessAt, &conn.LastError, &conn.CreatedAt, &conn.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -1257,7 +1265,7 @@ func runtimeTaskReviewRequest(c *fiber.Ctx) error {
 func deliverPendingAgentEvents() {
 	_, _ = db.Exec(context.Background(), `
 		UPDATE agent_events
-		SET delivery_status='pending', response_status='processing_timeout_requeued'
+		SET delivery_status='pending', response_status='processing_timeout_requeued', next_attempt_at=CURRENT_TIMESTAMP + INTERVAL '30 seconds'
 		WHERE delivery_status='processing'
 		  AND processed_at IS NULL
 		  AND last_delivery_at < CURRENT_TIMESTAMP - INTERVAL '60 seconds'`)
@@ -1267,6 +1275,8 @@ func deliverPendingAgentEvents() {
 			SELECT id
 			FROM agent_events
 			WHERE delivery_status IN ('pending','failed')
+			  AND (next_attempt_at IS NULL OR next_attempt_at <= CURRENT_TIMESTAMP)
+			  AND delivery_attempts < 8
 			ORDER BY created_at ASC
 			LIMIT 20
 			FOR UPDATE SKIP LOCKED
@@ -1276,6 +1286,14 @@ func deliverPendingAgentEvents() {
 		FROM claimed
 		WHERE ae.id = claimed.id
 		RETURNING ae.id, ae.agent_id, ae.board_id::text, ae.task_id, ae.event_type, ae.payload_json::text, ae.delivery_status, ae.delivery_attempts, ae.last_delivery_at, ae.response_status, ae.response_body, ae.created_at, ae.processed_at`)
+	if err == nil {
+		_, _ = db.Exec(context.Background(), `
+			UPDATE agent_events
+			SET delivery_status='dead', response_status='retry_exhausted', processed_at=CURRENT_TIMESTAMP
+			WHERE delivery_status IN ('pending','failed')
+			  AND delivery_attempts >= 8
+			  AND processed_at IS NULL`)
+	}
 	if err != nil {
 		log.Printf("event query failed: %v", err)
 		return
@@ -1294,13 +1312,13 @@ func deliverPendingAgentEvents() {
 				defer func() { <-deliverySemaphore }()
 				defer func() {
 					if r := recover(); r != nil {
-						_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status=$2, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, fmt.Sprintf("panic:%v", r))
+						markEventFailed(ev, fmt.Sprintf("panic:%v", r), "")
 					}
 				}()
 				processAgentEventDelivery(ev)
 			}(ev)
 		default:
-			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='pending', response_status='dispatcher_backpressure', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
+			markEventFailed(ev, "dispatcher_backpressure", "")
 		}
 	}
 }
@@ -1308,13 +1326,13 @@ func deliverPendingAgentEvents() {
 func processAgentEventDelivery(ev AgentEvent) {
 	conn, err := getConnectorForAgent(ev.AgentID)
 	if err != nil || conn == nil {
-		_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status='connector_missing', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
+		markEventFailed(ev, "connector_missing", "")
 		return
 	}
 
 	if conn.ConnectorType == "webhook" {
 		if conn.EndpointURL == "" {
-			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status='webhook_missing_endpoint', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
+			markEventFailed(ev, "webhook_missing_endpoint", "")
 			return
 		}
 		deliverEventHTTPRequest(ev, conn, conn.EndpointURL, ev.PayloadJSON, map[string]string{"Content-Type": "application/json"}, "webhook")
@@ -1337,17 +1355,17 @@ func processAgentEventDelivery(ev AgentEvent) {
 		switch conn.TransportMode {
 		case "internal":
 			if strings.TrimSpace(conn.SessionKey) == "" {
-				_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status='internal_missing_session_key', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
+				markEventFailed(ev, "internal_missing_session_key", "")
 				return
 			}
 			if err := deliverInternalClawnEvent(ev, conn, string(envelopeBytes)); err != nil {
-				_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status=$2, response_body=$3, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, err.Error(), fmt.Sprintf(`{"strategy":"internal","agent_ref":%q,"session_key":%q}`, conn.AgentRef, conn.SessionKey))
+				markEventFailed(ev, err.Error(), fmt.Sprintf(`{"strategy":"internal","agent_ref":%q,"session_key":%q}`, conn.AgentRef, conn.SessionKey))
 				return
 			}
 			return
 		case "remote_http":
 			if conn.BaseURL == "" {
-				_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status='remote_http_missing_base_url', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
+				markEventFailed(ev, "remote_http_missing_base_url", "")
 				return
 			}
 			targetURL := strings.TrimRight(conn.BaseURL, "/") + "/api/runtime/events"
@@ -1359,7 +1377,7 @@ func processAgentEventDelivery(ev AgentEvent) {
 			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='routed', delivery_attempts=delivery_attempts+1, response_status='pull_runtime_pending', response_body=$2, processed_at=CURRENT_TIMESTAMP, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, responseBody)
 			return
 		default:
-			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status=$2, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, "unsupported_transport_mode:"+conn.TransportMode)
+			markEventFailed(ev, "unsupported_transport_mode:"+conn.TransportMode, "")
 			return
 		}
 	}
@@ -1367,10 +1385,37 @@ func processAgentEventDelivery(ev AgentEvent) {
 	_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='ignored', response_status=$2, processed_at=CURRENT_TIMESTAMP, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, conn.ConnectorType)
 }
 
+func nextRetryDelay(attempts int) time.Duration {
+	switch {
+	case attempts <= 1:
+		return 10 * time.Second
+	case attempts == 2:
+		return 30 * time.Second
+	case attempts == 3:
+		return 60 * time.Second
+	case attempts <= 5:
+		return 5 * time.Minute
+	default:
+		return 15 * time.Minute
+	}
+}
+
+func markEventFailed(ev AgentEvent, responseStatus string, responseBody string) {
+	nextAttempt := time.Now().Add(nextRetryDelay(ev.DeliveryAttempts + 1))
+	status := "failed"
+	processedAt := "NULL"
+	if ev.DeliveryAttempts+1 >= 8 {
+		status = "dead"
+		processedAt = "CURRENT_TIMESTAMP"
+	}
+	query := fmt.Sprintf(`UPDATE agent_events SET delivery_status=$2, delivery_attempts=delivery_attempts+1, response_status=$3, response_body=$4, next_attempt_at=$5, last_delivery_at=CURRENT_TIMESTAMP, processed_at=%s WHERE id=$1`, processedAt)
+	_, _ = db.Exec(context.Background(), query, ev.ID, status, responseStatus, responseBody, nextAttempt)
+}
+
 func deliverEventHTTPRequest(ev AgentEvent, conn *AgentConnector, targetURL string, body string, headers map[string]string, strategy string) {
 	req, err := http.NewRequest("POST", targetURL, strings.NewReader(body))
 	if err != nil {
-		_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status=$2, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, err.Error())
+		markEventFailed(ev, err.Error(), "")
 		return
 	}
 	for k, v := range headers {
@@ -1381,7 +1426,7 @@ func deliverEventHTTPRequest(ev AgentEvent, conn *AgentConnector, targetURL stri
 	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status=$2, response_body=$3, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, err.Error(), fmt.Sprintf(`{"strategy":%q,"target_url":%q}`, strategy, targetURL))
+		markEventFailed(ev, err.Error(), fmt.Sprintf(`{"strategy":%q,"target_url":%q}`, strategy, targetURL))
 		return
 	}
 	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1000))
