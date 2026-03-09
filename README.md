@@ -91,6 +91,12 @@ MoziBoard provides a Model Context Protocol (MCP) server for direct integration 
 }
 ```
 
+## 📚 Runtime & Ops Docs
+
+Additional technical docs for agent/runtime integrations:
+- Runtime auth, webhook signing, and ops endpoints: `docs/runtime-auth-and-ops-api.md`
+- Internal bridge and dispatcher hardening changelog: `docs/changelog-2026-03-09-internal-bridge-fix.md`
+
 ## 🚀 Getting Started
 
 ### Prerequisites
