@@ -81,18 +81,21 @@ type Agent struct {
 }
 
 type AgentConnector struct {
-	ID             int       `json:"id"`
-	AgentID        string    `json:"agent_id"`
-	ConnectorType  string    `json:"connector_type"`
-	AuthType       string    `json:"auth_type"`
-	EndpointURL    string    `json:"endpoint_url,omitempty"`
-	SessionKey     string    `json:"session_key,omitempty"`
-	Status         string    `json:"status"`
-	MetadataJSON   string    `json:"metadata_json,omitempty"`
-	LastSuccessAt  *time.Time `json:"last_success_at,omitempty"`
-	LastError      string    `json:"last_error,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID            int        `json:"id"`
+	AgentID       string     `json:"agent_id"`
+	ConnectorType string     `json:"connector_type"`
+	TransportMode string     `json:"transport_mode,omitempty"`
+	AuthType      string     `json:"auth_type"`
+	EndpointURL   string     `json:"endpoint_url,omitempty"`
+	BaseURL       string     `json:"base_url,omitempty"`
+	AgentRef      string     `json:"agent_ref,omitempty"`
+	SessionKey    string     `json:"session_key,omitempty"`
+	Status        string     `json:"status"`
+	MetadataJSON  string     `json:"metadata_json,omitempty"`
+	LastSuccessAt *time.Time `json:"last_success_at,omitempty"`
+	LastError     string     `json:"last_error,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 type BoardAgent struct {
@@ -201,8 +204,11 @@ type AgentRegisterReq struct {
 
 type AgentConnectorInput struct {
 	ConnectorType string                 `json:"connector_type"`
+	TransportMode string                 `json:"transport_mode"`
 	AuthType      string                 `json:"auth_type"`
 	EndpointURL   string                 `json:"endpoint_url"`
+	BaseURL       string                 `json:"base_url"`
+	AgentRef      string                 `json:"agent_ref"`
 	SessionKey    string                 `json:"session_key"`
 	Metadata      map[string]interface{} `json:"metadata"`
 }
@@ -434,9 +440,12 @@ func initDB() {
 		id SERIAL PRIMARY KEY,
 		agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
 		connector_type TEXT NOT NULL,
+		transport_mode TEXT DEFAULT 'internal',
 		auth_type TEXT NOT NULL,
 		machine_token_hash TEXT DEFAULT '',
 		endpoint_url TEXT DEFAULT '',
+		base_url TEXT DEFAULT '',
+		agent_ref TEXT DEFAULT '',
 		session_key TEXT DEFAULT '',
 		shared_secret_hash TEXT DEFAULT '',
 		status TEXT DEFAULT 'pending',
@@ -446,6 +455,9 @@ func initDB() {
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);`)
+	db.Exec(context.Background(), "ALTER TABLE agent_connectors ADD COLUMN IF NOT EXISTS transport_mode TEXT DEFAULT 'internal'")
+	db.Exec(context.Background(), "ALTER TABLE agent_connectors ADD COLUMN IF NOT EXISTS base_url TEXT DEFAULT ''")
+	db.Exec(context.Background(), "ALTER TABLE agent_connectors ADD COLUMN IF NOT EXISTS agent_ref TEXT DEFAULT ''")
 
 	db.Exec(context.Background(), `
 	CREATE TABLE IF NOT EXISTS board_agents (
@@ -810,8 +822,8 @@ func createNotification(taskID *int, targetAgentID string, sourceAgentID *string
 
 func getConnectorForAgent(agentID string) (*AgentConnector, error) {
 	var conn AgentConnector
-	err := db.QueryRow(context.Background(), `SELECT id, agent_id, connector_type, auth_type, endpoint_url, session_key, status, metadata_json::text, last_success_at, last_error, created_at, updated_at FROM agent_connectors WHERE agent_id=$1 ORDER BY id ASC LIMIT 1`, agentID).
-		Scan(&conn.ID, &conn.AgentID, &conn.ConnectorType, &conn.AuthType, &conn.EndpointURL, &conn.SessionKey, &conn.Status, &conn.MetadataJSON, &conn.LastSuccessAt, &conn.LastError, &conn.CreatedAt, &conn.UpdatedAt)
+	err := db.QueryRow(context.Background(), `SELECT id, agent_id, connector_type, transport_mode, auth_type, endpoint_url, base_url, agent_ref, session_key, status, metadata_json::text, last_success_at, last_error, created_at, updated_at FROM agent_connectors WHERE agent_id=$1 ORDER BY id ASC LIMIT 1`, agentID).
+		Scan(&conn.ID, &conn.AgentID, &conn.ConnectorType, &conn.TransportMode, &conn.AuthType, &conn.EndpointURL, &conn.BaseURL, &conn.AgentRef, &conn.SessionKey, &conn.Status, &conn.MetadataJSON, &conn.LastSuccessAt, &conn.LastError, &conn.CreatedAt, &conn.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -885,8 +897,8 @@ func resolveRuntimeAgent(c *fiber.Ctx) (*AgentConnector, error) {
 	}
 	hash := hashToken(token)
 	var conn AgentConnector
-	err := db.QueryRow(context.Background(), `SELECT id, agent_id, connector_type, auth_type, endpoint_url, session_key, status, metadata_json::text, last_success_at, last_error, created_at, updated_at FROM agent_connectors WHERE machine_token_hash=$1`, hash).
-		Scan(&conn.ID, &conn.AgentID, &conn.ConnectorType, &conn.AuthType, &conn.EndpointURL, &conn.SessionKey, &conn.Status, &conn.MetadataJSON, &conn.LastSuccessAt, &conn.LastError, &conn.CreatedAt, &conn.UpdatedAt)
+	err := db.QueryRow(context.Background(), `SELECT id, agent_id, connector_type, transport_mode, auth_type, endpoint_url, base_url, agent_ref, session_key, status, metadata_json::text, last_success_at, last_error, created_at, updated_at FROM agent_connectors WHERE machine_token_hash=$1`, hash).
+		Scan(&conn.ID, &conn.AgentID, &conn.ConnectorType, &conn.TransportMode, &conn.AuthType, &conn.EndpointURL, &conn.BaseURL, &conn.AgentRef, &conn.SessionKey, &conn.Status, &conn.MetadataJSON, &conn.LastSuccessAt, &conn.LastError, &conn.CreatedAt, &conn.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -1018,6 +1030,13 @@ func registerAgent(c *fiber.Ctx) error {
 	if req.Engine == "" { req.Engine = "custom" }
 	if req.Connector.ConnectorType == "" { req.Connector.ConnectorType = "custom" }
 	if req.Connector.AuthType == "" { req.Connector.AuthType = "machine_token" }
+	if req.Connector.TransportMode == "" {
+		if req.Connector.ConnectorType == "clawn_native" {
+			req.Connector.TransportMode = "internal"
+		} else {
+			req.Connector.TransportMode = "push"
+		}
+	}
 	if req.Capabilities == nil { req.Capabilities = map[string]interface{}{} }
 	metaBytes, _ := json.Marshal(req.Connector.Metadata)
 	capBytes, _ := json.Marshal(req.Capabilities)
@@ -1028,10 +1047,10 @@ func registerAgent(c *fiber.Ctx) error {
 	_, err = db.Exec(context.Background(), `INSERT INTO agents (id, display_name, role_name, avatar, provider, engine, description, is_native_clawn, soul, memory, rules, cron_schedule, active, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'','', '', '*/10 * * * *', true, 'offline') ON CONFLICT (id) DO UPDATE SET display_name=EXCLUDED.display_name, role_name=EXCLUDED.role_name, avatar=EXCLUDED.avatar, provider=EXCLUDED.provider, engine=EXCLUDED.engine, description=EXCLUDED.description, is_native_clawn=EXCLUDED.is_native_clawn, updated_at=CURRENT_TIMESTAMP`, req.ID, req.DisplayName, req.RoleName, req.Avatar, req.Provider, req.Engine, req.Description, req.IsNativeClawn)
 	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
 	var connectorID int
-	err = db.QueryRow(context.Background(), `INSERT INTO agent_connectors (agent_id, connector_type, auth_type, machine_token_hash, endpoint_url, session_key, status, metadata_json) VALUES ($1,$2,$3,$4,$5,$6,'connected',$7::jsonb) RETURNING id`, req.ID, req.Connector.ConnectorType, req.Connector.AuthType, tokenHash, req.Connector.EndpointURL, req.Connector.SessionKey, string(metaBytes)).Scan(&connectorID)
+	err = db.QueryRow(context.Background(), `INSERT INTO agent_connectors (agent_id, connector_type, transport_mode, auth_type, machine_token_hash, endpoint_url, base_url, agent_ref, session_key, status, metadata_json) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'connected',$10::jsonb) RETURNING id`, req.ID, req.Connector.ConnectorType, req.Connector.TransportMode, req.Connector.AuthType, tokenHash, req.Connector.EndpointURL, req.Connector.BaseURL, req.Connector.AgentRef, req.Connector.SessionKey, string(metaBytes)).Scan(&connectorID)
 	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
 	_ = capBytes
-	return c.JSON(fiber.Map{"agent": fiber.Map{"id": req.ID, "display_name": req.DisplayName, "provider": req.Provider, "engine": req.Engine}, "connector": fiber.Map{"id": connectorID, "connector_type": req.Connector.ConnectorType, "status": "connected"}, "machine_token": plainToken})
+	return c.JSON(fiber.Map{"agent": fiber.Map{"id": req.ID, "display_name": req.DisplayName, "provider": req.Provider, "engine": req.Engine}, "connector": fiber.Map{"id": connectorID, "connector_type": req.Connector.ConnectorType, "transport_mode": req.Connector.TransportMode, "base_url": req.Connector.BaseURL, "agent_ref": req.Connector.AgentRef, "status": "connected"}, "machine_token": plainToken})
 }
 
 func connectAgentToBoard(c *fiber.Ctx) error {
