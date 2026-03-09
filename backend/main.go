@@ -1281,33 +1281,85 @@ func deliverPendingAgentEvents() {
 			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status='connector_missing', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
 			continue
 		}
-		if conn.ConnectorType != "webhook" || conn.EndpointURL == "" {
-			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='ignored', response_status=$2, processed_at=CURRENT_TIMESTAMP, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, conn.ConnectorType)
+
+		if conn.ConnectorType == "webhook" {
+			if conn.EndpointURL == "" {
+				_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status='webhook_missing_endpoint', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
+				continue
+			}
+			deliverEventHTTPRequest(ev, conn, conn.EndpointURL, ev.PayloadJSON, map[string]string{"Content-Type": "application/json"}, "webhook")
 			continue
 		}
-		req, err := http.NewRequest("POST", conn.EndpointURL, strings.NewReader(ev.PayloadJSON))
-		if err != nil {
-			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status=$2, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, err.Error())
-			continue
+
+		if conn.ConnectorType == "clawn_native" {
+			envelopeBytes, _ := json.Marshal(fiber.Map{
+				"event_id": ev.ID,
+				"event_type": ev.EventType,
+				"agent_id": ev.AgentID,
+				"board_id": ev.BoardID,
+				"task_id": ev.TaskID,
+				"transport_mode": conn.TransportMode,
+				"agent_ref": conn.AgentRef,
+				"session_key": conn.SessionKey,
+				"payload": json.RawMessage(ev.PayloadJSON),
+			})
+
+			switch conn.TransportMode {
+			case "internal":
+				responseBody := fmt.Sprintf(`{"strategy":"internal","agent_ref":%q,"session_key":%q}`, conn.AgentRef, conn.SessionKey)
+				_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='routed', delivery_attempts=delivery_attempts+1, response_status='internal_runtime_pending', response_body=$2, processed_at=CURRENT_TIMESTAMP, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, responseBody)
+				continue
+			case "remote_http":
+				if conn.BaseURL == "" {
+					_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status='remote_http_missing_base_url', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
+					continue
+				}
+				targetURL := strings.TrimRight(conn.BaseURL, "/") + "/api/runtime/events"
+				headers := map[string]string{"Content-Type": "application/json", "X-Mozi-Agent-Ref": conn.AgentRef, "X-Mozi-Session-Key": conn.SessionKey}
+				deliverEventHTTPRequest(ev, conn, targetURL, string(envelopeBytes), headers, "clawn_remote_http")
+				continue
+			case "pull":
+				responseBody := fmt.Sprintf(`{"strategy":"pull","agent_ref":%q}`, conn.AgentRef)
+				_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='routed', delivery_attempts=delivery_attempts+1, response_status='pull_runtime_pending', response_body=$2, processed_at=CURRENT_TIMESTAMP, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, responseBody)
+				continue
+			default:
+				_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status=$2, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, "unsupported_transport_mode:"+conn.TransportMode)
+				continue
+			}
 		}
-		req.Header.Set("Content-Type", "application/json")
-		client := &http.Client{Timeout: 8 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status=$2, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, err.Error())
-			continue
-		}
-		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1000))
-		resp.Body.Close()
-		status := "failed"
-		processedAt := "NULL"
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			status = "sent"
-			processedAt = "CURRENT_TIMESTAMP"
-		}
-		query := fmt.Sprintf(`UPDATE agent_events SET delivery_status=$2, delivery_attempts=delivery_attempts+1, last_delivery_at=CURRENT_TIMESTAMP, response_status=$3, response_body=$4, processed_at=%s WHERE id=$1`, processedAt)
-		_, _ = db.Exec(context.Background(), query, ev.ID, status, resp.Status, string(bodyBytes))
+
+		_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='ignored', response_status=$2, processed_at=CURRENT_TIMESTAMP, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, conn.ConnectorType)
 	}
+}
+
+func deliverEventHTTPRequest(ev AgentEvent, conn *AgentConnector, targetURL string, body string, headers map[string]string, strategy string) {
+	req, err := http.NewRequest("POST", targetURL, strings.NewReader(body))
+	if err != nil {
+		_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status=$2, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, err.Error())
+		return
+	}
+	for k, v := range headers {
+		if strings.TrimSpace(v) != "" {
+			req.Header.Set(k, v)
+		}
+	}
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status=$2, response_body=$3, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, err.Error(), fmt.Sprintf(`{"strategy":%q,"target_url":%q}`, strategy, targetURL))
+		return
+	}
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1000))
+	resp.Body.Close()
+	status := "failed"
+	processedAt := "NULL"
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		status = "sent"
+		processedAt = "CURRENT_TIMESTAMP"
+	}
+	responseBody := fmt.Sprintf(`{"strategy":%q,"target_url":%q,"response_body":%q}`, strategy, targetURL, string(bodyBytes))
+	query := fmt.Sprintf(`UPDATE agent_events SET delivery_status=$2, delivery_attempts=delivery_attempts+1, last_delivery_at=CURRENT_TIMESTAMP, response_status=$3, response_body=$4, processed_at=%s WHERE id=$1`, processedAt)
+	_, _ = db.Exec(context.Background(), query, ev.ID, status, resp.Status, responseBody)
 }
 
 // getAiAgenzProjects proxies a request to the main AiAgenz backend to fetch the user's projects (agents).
