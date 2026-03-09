@@ -150,6 +150,7 @@ type AgentEvent struct {
 	PayloadJSON      string     `json:"payload_json"`
 	DeliveryStatus   string     `json:"delivery_status"`
 	DeliveryAttempts int        `json:"delivery_attempts"`
+	NextAttemptAt    *time.Time `json:"next_attempt_at,omitempty"`
 	LastDeliveryAt   *time.Time `json:"last_delivery_at,omitempty"`
 	ResponseStatus   string     `json:"response_status,omitempty"`
 	ResponseBody     string     `json:"response_body,omitempty"`
@@ -677,6 +678,8 @@ func main() {
 	app.Post("/api/runtime/task-review-request", runtimeTaskReviewRequest)
 	app.Get("/api/agents/:id/runs", getAgentRunsForAgent)
 	app.Get("/api/agents/:id/notifications", getAgentNotifications)
+	app.Get("/api/ops/agent-events", getAgentEventsOps)
+	app.Get("/api/ops/connectors", getAgentConnectorsOps)
 	app.Post("/api/agents/:id/heartbeat", heartbeatAgent)
 	app.Put("/api/agents/:id/status", updateAgentStatus)
 	app.Get("/api/agents/sync/aiagenz", getAiAgenzProjects)
@@ -720,10 +723,13 @@ func startDispatcher() {
 
 func pollAgentTasks() {
 	query := `
-		SELECT t.id, t.board_id::text, t.title, t.description, t.assignee_id 
+		SELECT t.id, t.board_id::text, t.title, t.description, t.assignee_id
 		FROM tasks t
 		JOIN members m ON t.assignee_id = m.id
-		WHERE lower(t.list_id) = 'todo' AND m.role = 'agent'
+		JOIN board_agents ba ON ba.board_id = t.board_id AND ba.agent_id = t.assignee_id AND ba.active = true
+		WHERE lower(t.list_id) = 'todo'
+		  AND m.role = 'agent'
+		  AND ba.auto_accept_tasks = true
 	`
 	rows, err := db.Query(context.Background(), query)
 	if err != nil {
@@ -2144,6 +2150,62 @@ func getAgentNotifications(c *fiber.Ctx) error {
 		items = append(items, n)
 	}
 	if items == nil { items = []Notification{} }
+	return c.JSON(items)
+}
+
+func getAgentEventsOps(c *fiber.Ctx) error {
+	status := strings.TrimSpace(c.Query("status"))
+	agentID := strings.TrimSpace(c.Query("agent_id"))
+	query := `SELECT id, agent_id, board_id::text, task_id, event_type, payload_json::text, delivery_status, delivery_attempts, next_attempt_at, last_delivery_at, response_status, response_body, created_at, processed_at FROM agent_events WHERE 1=1`
+	args := []interface{}{}
+	idx := 1
+	if status != "" {
+		query += fmt.Sprintf(" AND delivery_status=$%d", idx)
+		args = append(args, status)
+		idx++
+	}
+	if agentID != "" {
+		query += fmt.Sprintf(" AND agent_id=$%d", idx)
+		args = append(args, agentID)
+		idx++
+	}
+	query += " ORDER BY created_at DESC LIMIT 100"
+	rows, err := db.Query(context.Background(), query, args...)
+	if err != nil { return c.Status(500).SendString(err.Error()) }
+	defer rows.Close()
+	var items []AgentEvent
+	for rows.Next() {
+		var ev AgentEvent
+		if err := rows.Scan(&ev.ID, &ev.AgentID, &ev.BoardID, &ev.TaskID, &ev.EventType, &ev.PayloadJSON, &ev.DeliveryStatus, &ev.DeliveryAttempts, &ev.NextAttemptAt, &ev.LastDeliveryAt, &ev.ResponseStatus, &ev.ResponseBody, &ev.CreatedAt, &ev.ProcessedAt); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+		items = append(items, ev)
+	}
+	if items == nil { items = []AgentEvent{} }
+	return c.JSON(items)
+}
+
+func getAgentConnectorsOps(c *fiber.Ctx) error {
+	status := strings.TrimSpace(c.Query("status"))
+	query := `SELECT id, agent_id, connector_type, transport_mode, auth_type, endpoint_url, base_url, agent_ref, session_key, status, metadata_json::text, last_success_at, last_error, created_at, updated_at FROM agent_connectors WHERE 1=1`
+	args := []interface{}{}
+	if status != "" {
+		query += " AND status=$1"
+		args = append(args, status)
+	}
+	query += " ORDER BY updated_at DESC, id DESC LIMIT 100"
+	rows, err := db.Query(context.Background(), query, args...)
+	if err != nil { return c.Status(500).SendString(err.Error()) }
+	defer rows.Close()
+	var items []AgentConnector
+	for rows.Next() {
+		var conn AgentConnector
+		if err := rows.Scan(&conn.ID, &conn.AgentID, &conn.ConnectorType, &conn.TransportMode, &conn.AuthType, &conn.EndpointURL, &conn.BaseURL, &conn.AgentRef, &conn.SessionKey, &conn.Status, &conn.MetadataJSON, &conn.LastSuccessAt, &conn.LastError, &conn.CreatedAt, &conn.UpdatedAt); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+		items = append(items, conn)
+	}
+	if items == nil { items = []AgentConnector{} }
 	return c.JSON(items)
 }
 
