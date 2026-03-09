@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,17 +47,52 @@ type Task struct {
 	AssigneeID  *string `json:"assignee_id"`
 	ParentID    *int    `json:"parent_id,omitempty"`
 	UpdatedBy   string  `json:"updated_by,omitempty"`
+	Status      string  `json:"status,omitempty"`
+	BlockedReason string `json:"blocked_reason,omitempty"`
 }
 
 type Agent struct {
-	ID           string    `json:"id"`
-	Soul         string    `json:"soul"`
-	Memory       string    `json:"memory"`
-	Rules        string    `json:"rules"`
-	CronSchedule string    `json:"cron_schedule"`
-	Active       bool      `json:"active"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID              string     `json:"id"`
+	Soul            string     `json:"soul"`
+	Memory          string     `json:"memory"`
+	Rules           string     `json:"rules"`
+	CronSchedule    string     `json:"cron_schedule"`
+	Active          bool       `json:"active"`
+	Status          string     `json:"status"`
+	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
+	LastSeenAt      *time.Time `json:"last_seen_at,omitempty"`
+	CurrentTaskID   *int       `json:"current_task_id,omitempty"`
+	CurrentRunID    *int       `json:"current_run_id,omitempty"`
+	CurrentActivity string     `json:"current_activity,omitempty"`
+	HealthNote      string     `json:"health_note,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+type AgentRun struct {
+	ID             int        `json:"id"`
+	TaskID         int        `json:"task_id"`
+	AgentID        string     `json:"agent_id"`
+	SessionKey     string     `json:"session_key"`
+	ProviderType   string     `json:"provider_type"`
+	Status         string     `json:"status"`
+	StartedAt      time.Time  `json:"started_at"`
+	EndedAt        *time.Time `json:"ended_at,omitempty"`
+	CurrentActivity string    `json:"current_activity,omitempty"`
+	ErrorSummary   string     `json:"error_summary,omitempty"`
+	ResultSummary  string     `json:"result_summary,omitempty"`
+}
+
+type Notification struct {
+	ID            int        `json:"id"`
+	TaskID        *int       `json:"task_id,omitempty"`
+	TargetAgentID string     `json:"target_agent_id"`
+	SourceAgentID *string    `json:"source_agent_id,omitempty"`
+	Type          string     `json:"type"`
+	Content       string     `json:"content"`
+	Delivered     bool       `json:"delivered"`
+	DeliveredAt   *time.Time `json:"delivered_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
 }
 
 type Deliverable struct {
@@ -182,9 +218,23 @@ func initDB() {
 		rules TEXT DEFAULT '',
 		cron_schedule TEXT DEFAULT '*/10 * * * *',
 		active BOOLEAN DEFAULT true,
+		status TEXT DEFAULT 'offline',
+		last_heartbeat_at TIMESTAMP NULL,
+		last_seen_at TIMESTAMP NULL,
+		current_task_id INT NULL,
+		current_run_id INT NULL,
+		current_activity TEXT DEFAULT '',
+		health_note TEXT DEFAULT '',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);`)
+	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'offline'")
+	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMP NULL")
+	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP NULL")
+	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_task_id INT NULL")
+	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_run_id INT NULL")
+	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_activity TEXT DEFAULT ''")
+	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS health_note TEXT DEFAULT ''")
 
 	db.Exec(context.Background(), `
 	CREATE TABLE IF NOT EXISTS tasks (
@@ -199,6 +249,12 @@ func initDB() {
 		CONSTRAINT fk_board FOREIGN KEY(board_id) REFERENCES boards(id) ON DELETE CASCADE
 	);`)
 	db.Exec(context.Background(), "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS parent_id INT REFERENCES tasks(id) ON DELETE CASCADE")
+	db.Exec(context.Background(), "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'todo'")
+	db.Exec(context.Background(), "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS blocked_reason TEXT DEFAULT ''")
+	db.Exec(context.Background(), "UPDATE tasks SET status = COALESCE(NULLIF(status, ''), lower(list_id), 'todo')")
+	db.Exec(context.Background(), "UPDATE tasks SET status = 'in_progress' WHERE status = 'doing'")
+	db.Exec(context.Background(), "UPDATE tasks SET status = 'review' WHERE status = 'qa'")
+	db.Exec(context.Background(), "UPDATE tasks SET status = lower(list_id) WHERE status NOT IN ('backlog','todo','in_progress','review','done','blocked')")
 
 	db.Exec(context.Background(), `
 	CREATE TABLE IF NOT EXISTS deliverables (
@@ -249,6 +305,35 @@ func initDB() {
 		CONSTRAINT fk_comment_task FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
 	);`)
 
+	db.Exec(context.Background(), `
+	CREATE TABLE IF NOT EXISTS agent_runs (
+		id SERIAL PRIMARY KEY,
+		task_id INT NOT NULL,
+		agent_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+		session_key TEXT DEFAULT '',
+		provider_type TEXT DEFAULT 'openclaw',
+		status TEXT DEFAULT 'queued',
+		started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		ended_at TIMESTAMP NULL,
+		current_activity TEXT DEFAULT '',
+		error_summary TEXT DEFAULT '',
+		result_summary TEXT DEFAULT '',
+		CONSTRAINT fk_agent_run_task FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+	);`)
+
+	db.Exec(context.Background(), `
+	CREATE TABLE IF NOT EXISTS notifications (
+		id SERIAL PRIMARY KEY,
+		task_id INT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+		target_agent_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+		source_agent_id TEXT NULL REFERENCES members(id) ON DELETE SET NULL,
+		type TEXT NOT NULL,
+		content TEXT NOT NULL,
+		delivered BOOLEAN DEFAULT false,
+		delivered_at TIMESTAMP NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);`)
+
 	seedMembers()
 	seedBoardMembers()
 
@@ -270,7 +355,7 @@ func seedMembers() {
 
 		if m.Role == "agent" {
 			db.Exec(context.Background(),
-				"INSERT INTO agents (id, soul, memory, rules, cron_schedule) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING",
+				"INSERT INTO agents (id, soul, memory, rules, cron_schedule, status) VALUES ($1, $2, $3, $4, $5, 'offline') ON CONFLICT (id) DO NOTHING",
 				m.ID, "You are a helpful AI assistant in a software squad.", "No memories yet.", "Be concise.", "*/1 * * * *")
 		}
 	}
@@ -410,12 +495,17 @@ func main() {
 	app.Post("/api/tasks", createTask)
 	app.Put("/api/tasks/:id", updateTask)
 	app.Get("/api/tasks/:id/activities", getTaskActivities)
+	app.Get("/api/tasks/:id/runs", getTaskRuns)
 	app.Get("/api/tasks/:id/deliverables", getTaskDeliverables)
 	app.Post("/api/tasks/:id/deliverables", createDeliverable)
 	app.Get("/api/search", searchTasks)
 	app.Get("/api/members", getMembers)
 	app.Get("/api/agents/:id", getAgentProfile)
 	app.Get("/api/agents", getAgents)
+	app.Get("/api/agents/:id/runs", getAgentRunsForAgent)
+	app.Get("/api/agents/:id/notifications", getAgentNotifications)
+	app.Post("/api/agents/:id/heartbeat", heartbeatAgent)
+	app.Put("/api/agents/:id/status", updateAgentStatus)
 	app.Get("/api/agents/sync/aiagenz", getAiAgenzProjects)
 
 	// Auth Proxies
@@ -523,6 +613,55 @@ func processAgentTask(t Task) {
 	}
 }
 
+func normalizeTaskStatus(listID string) string {
+	switch strings.ToLower(listID) {
+	case "doing", "in_progress":
+		return "in_progress"
+	case "qa", "review":
+		return "review"
+	case "blocked":
+		return "blocked"
+	case "backlog":
+		return "backlog"
+	case "done":
+		return "done"
+	default:
+		return "todo"
+	}
+}
+
+func statusToListID(status string) string {
+	switch strings.ToLower(status) {
+	case "in_progress":
+		return "doing"
+	case "review":
+		return "qa"
+	default:
+		return strings.ToLower(status)
+	}
+}
+
+func createNotification(taskID *int, targetAgentID string, sourceAgentID *string, notifType, content string) {
+	if targetAgentID == "" {
+		return
+	}
+	db.Exec(context.Background(),
+		"INSERT INTO notifications (task_id, target_agent_id, source_agent_id, type, content) VALUES ($1, $2, $3, $4, $5)",
+		taskID, targetAgentID, sourceAgentID, notifType, content)
+}
+
+func createAgentRun(taskID int, agentID string, status string, activity string) *int {
+	var runID int
+	err := db.QueryRow(context.Background(),
+		"INSERT INTO agent_runs (task_id, agent_id, session_key, provider_type, status, current_activity) VALUES ($1, $2, $3, 'openclaw', $4, $5) RETURNING id",
+		taskID, agentID, fmt.Sprintf("mozi:%s:%d", agentID, taskID), status, activity).Scan(&runID)
+	if err != nil {
+		log.Printf("failed to create agent run: %v", err)
+		return nil
+	}
+	return &runID
+}
+
 func getBoards(c *fiber.Ctx) error {
 	rows, err := db.Query(context.Background(), "SELECT id::text, user_id, title, description FROM boards ORDER BY created_at ASC")
 	if err != nil {
@@ -563,7 +702,7 @@ func createBoard(c *fiber.Ctx) error {
 
 func getBoardTasks(c *fiber.Ctx) error {
 	boardID := c.Params("id")
-	rows, err := db.Query(context.Background(), "SELECT id, board_id::text, title, description, list_id, position, assignee_id, parent_id FROM tasks WHERE board_id=$1 ORDER BY position ASC", boardID)
+	rows, err := db.Query(context.Background(), "SELECT id, board_id::text, title, description, list_id, position, assignee_id, parent_id, status, blocked_reason FROM tasks WHERE board_id=$1 ORDER BY position ASC", boardID)
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
@@ -571,7 +710,7 @@ func getBoardTasks(c *fiber.Ctx) error {
 	var tasks []Task
 	for rows.Next() {
 		var t Task
-		if err := rows.Scan(&t.ID, &t.BoardID, &t.Title, &t.Description, &t.ListID, &t.Position, &t.AssigneeID, &t.ParentID); err != nil {
+		if err := rows.Scan(&t.ID, &t.BoardID, &t.Title, &t.Description, &t.ListID, &t.Position, &t.AssigneeID, &t.ParentID, &t.Status, &t.BlockedReason); err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
 		tasks = append(tasks, t)
@@ -603,7 +742,7 @@ func getMembers(c *fiber.Ctx) error {
 }
 
 func getAgents(c *fiber.Ctx) error {
-	rows, err := db.Query(context.Background(), "SELECT id, soul, memory, rules, cron_schedule, active, created_at, updated_at FROM agents")
+	rows, err := db.Query(context.Background(), "SELECT id, soul, memory, rules, cron_schedule, active, status, last_heartbeat_at, last_seen_at, current_task_id, current_run_id, current_activity, health_note, created_at, updated_at FROM agents")
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
@@ -611,7 +750,7 @@ func getAgents(c *fiber.Ctx) error {
 	var agents []Agent
 	for rows.Next() {
 		var a Agent
-		if err := rows.Scan(&a.ID, &a.Soul, &a.Memory, &a.Rules, &a.CronSchedule, &a.Active, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.Soul, &a.Memory, &a.Rules, &a.CronSchedule, &a.Active, &a.Status, &a.LastHeartbeatAt, &a.LastSeenAt, &a.CurrentTaskID, &a.CurrentRunID, &a.CurrentActivity, &a.HealthNote, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
 		agents = append(agents, a)
@@ -626,8 +765,8 @@ func getAgentProfile(c *fiber.Ctx) error {
 	agentID := c.Params("id")
 	var a Agent
 	err := db.QueryRow(context.Background(),
-		"SELECT id, soul, memory, rules, cron_schedule, active, created_at, updated_at FROM agents WHERE id=$1",
-		agentID).Scan(&a.ID, &a.Soul, &a.Memory, &a.Rules, &a.CronSchedule, &a.Active, &a.CreatedAt, &a.UpdatedAt)
+		"SELECT id, soul, memory, rules, cron_schedule, active, status, last_heartbeat_at, last_seen_at, current_task_id, current_run_id, current_activity, health_note, created_at, updated_at FROM agents WHERE id=$1",
+		agentID).Scan(&a.ID, &a.Soul, &a.Memory, &a.Rules, &a.CronSchedule, &a.Active, &a.Status, &a.LastHeartbeatAt, &a.LastSeenAt, &a.CurrentTaskID, &a.CurrentRunID, &a.CurrentActivity, &a.HealthNote, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return c.Status(404).SendString("Agent not found")
 	}
@@ -807,21 +946,29 @@ func createTask(c *fiber.Ctx) error {
 	if t.Title == "" {
 		return c.Status(400).SendString("Title is required")
 	}
-	if t.BoardID == "" {
-		return c.Status(400).SendString("Board ID is required")
-	}
 	if t.ListID == "" {
 		t.ListID = "todo"
 	}
+	t.Status = normalizeTaskStatus(t.ListID)
+	t.ListID = statusToListID(t.Status)
 
 	var id int
 	err := db.QueryRow(context.Background(),
-		"INSERT INTO tasks (board_id, title, description, list_id, position, assignee_id, parent_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
-		t.BoardID, t.Title, t.Description, t.ListID, t.Position, t.AssigneeID, t.ParentID).Scan(&id)
+		"INSERT INTO tasks (board_id, title, description, list_id, position, assignee_id, parent_id, status, blocked_reason) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+		t.BoardID, t.Title, t.Description, t.ListID, t.Position, t.AssigneeID, t.ParentID, t.Status, t.BlockedReason).Scan(&id)
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
 	t.ID = id
+
+	if t.AssigneeID != nil && *t.AssigneeID != "" {
+		createNotification(&id, *t.AssigneeID, nil, "task_assigned", fmt.Sprintf("New task assigned: %s", t.Title))
+		if runID := createAgentRun(id, *t.AssigneeID, "queued", "Awaiting pickup"); runID != nil {
+			db.Exec(context.Background(), "UPDATE agents SET current_task_id=$1, current_run_id=$2, status='busy', current_activity=$3, last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$4", id, *runID, "Queued on task", *t.AssigneeID)
+		}
+	}
+
+	go logActivity(id, "system", "created", fmt.Sprintf("Task created with status %s", t.Status))
 	go updateEmbedding(id, t.Title+" "+t.Description)
 	go broadcastUpdate("UPDATE")
 	return c.JSON(t)
@@ -832,8 +979,8 @@ func updateTask(c *fiber.Ctx) error {
 
 	var oldTask Task
 	err := db.QueryRow(context.Background(),
-		"SELECT id, board_id::text, title, description, list_id, position, assignee_id, parent_id FROM tasks WHERE id=$1",
-		id).Scan(&oldTask.ID, &oldTask.BoardID, &oldTask.Title, &oldTask.Description, &oldTask.ListID, &oldTask.Position, &oldTask.AssigneeID, &oldTask.ParentID)
+		"SELECT id, board_id::text, title, description, list_id, position, assignee_id, parent_id, status, blocked_reason FROM tasks WHERE id=$1",
+		id).Scan(&oldTask.ID, &oldTask.BoardID, &oldTask.Title, &oldTask.Description, &oldTask.ListID, &oldTask.Position, &oldTask.AssigneeID, &oldTask.ParentID, &oldTask.Status, &oldTask.BlockedReason)
 	if err != nil {
 		return c.Status(404).SendString("Task not found")
 	}
@@ -842,70 +989,53 @@ func updateTask(c *fiber.Ctx) error {
 	if err := c.BodyParser(newTask); err != nil {
 		return c.Status(400).SendString(err.Error())
 	}
-
-	// Preserve existing values if fields are empty/missing
-	if newTask.BoardID == "" {
-		newTask.BoardID = oldTask.BoardID
-	}
-	if newTask.Title == "" {
-		newTask.Title = oldTask.Title
-	}
-	if newTask.Description == "" {
-		newTask.Description = oldTask.Description
-	}
-	if newTask.ListID == "" {
-		newTask.ListID = oldTask.ListID
-	}
-	if newTask.AssigneeID == nil {
-		newTask.AssigneeID = oldTask.AssigneeID
-	}
-	// We keep position as is if it's 0 (might be intentional move to top),
-	// but generally frontend sends it. Let's assume if it's 0 and not explicitly set, keep old?
-	// No, 0 is valid. Let's trust frontend or keep logic simple.
-	// Actually, Go structs default to 0/empty.
-	// To truly distinguish "unset" vs "empty", we'd need pointer fields.
-	// For MVP, if Title is empty, assume we keep old one.
-
-	if newTask.ParentID == nil {
-		newTask.ParentID = oldTask.ParentID
-	}
+	if newTask.BoardID == "" { newTask.BoardID = oldTask.BoardID }
+	if newTask.Title == "" { newTask.Title = oldTask.Title }
+	if newTask.Description == "" { newTask.Description = oldTask.Description }
+	if newTask.ListID == "" { newTask.ListID = oldTask.ListID }
+	if newTask.AssigneeID == nil { newTask.AssigneeID = oldTask.AssigneeID }
+	if newTask.ParentID == nil { newTask.ParentID = oldTask.ParentID }
+	if newTask.Status == "" { newTask.Status = normalizeTaskStatus(newTask.ListID) }
+	newTask.ListID = statusToListID(newTask.Status)
+	if newTask.Status == "blocked" && newTask.BlockedReason == "" { newTask.BlockedReason = oldTask.BlockedReason }
 
 	_, err = db.Exec(context.Background(),
-		"UPDATE tasks SET title=$1, description=$2, list_id=$3, position=$4, assignee_id=$5, board_id=$6, parent_id=$7 WHERE id=$8",
-		newTask.Title, newTask.Description, newTask.ListID, newTask.Position, newTask.AssigneeID, newTask.BoardID, newTask.ParentID, id)
+		"UPDATE tasks SET title=$1, description=$2, list_id=$3, position=$4, assignee_id=$5, board_id=$6, parent_id=$7, status=$8, blocked_reason=$9 WHERE id=$10",
+		newTask.Title, newTask.Description, newTask.ListID, newTask.Position, newTask.AssigneeID, newTask.BoardID, newTask.ParentID, newTask.Status, newTask.BlockedReason, id)
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
 
-	userID := "system" // Default
-	if newTask.UpdatedBy != "" {
-		userID = newTask.UpdatedBy
-	}
-
-	if newTask.ListID != oldTask.ListID {
-		go logActivity(id, userID, "moved", fmt.Sprintf("Moved to list %s", newTask.ListID))
+	userID := "system"
+	if newTask.UpdatedBy != "" { userID = newTask.UpdatedBy }
+	if newTask.ListID != oldTask.ListID || newTask.Status != oldTask.Status {
+		go logActivity(id, userID, "moved", fmt.Sprintf("Moved to %s", newTask.Status))
 	}
 
 	newAssignee, oldAssignee := "", ""
-	if newTask.AssigneeID != nil {
-		newAssignee = *newTask.AssigneeID
-	}
-	if oldTask.AssigneeID != nil {
-		oldAssignee = *oldTask.AssigneeID
-	}
-
+	if newTask.AssigneeID != nil { newAssignee = *newTask.AssigneeID }
+	if oldTask.AssigneeID != nil { oldAssignee = *oldTask.AssigneeID }
 	if newAssignee != oldAssignee {
 		if newAssignee != "" {
 			go logActivity(id, userID, "assigned", fmt.Sprintf("Assigned to %s", newAssignee))
+			createNotification(&id, newAssignee, nil, "task_assigned", fmt.Sprintf("Task assigned: %s", newTask.Title))
+			if runID := createAgentRun(id, newAssignee, "queued", "Awaiting pickup"); runID != nil {
+				db.Exec(context.Background(), "UPDATE agents SET current_task_id=$1, current_run_id=$2, status='busy', current_activity=$3, last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$4", id, *runID, "Queued on task", newAssignee)
+			}
 		} else {
 			go logActivity(id, userID, "unassigned", "Removed assignee")
 		}
 	}
-
+	if newTask.Status == "review" && oldTask.Status != "review" && oldTask.AssigneeID != nil {
+		createNotification(&id, *oldTask.AssigneeID, nil, "review_requested", fmt.Sprintf("Task ready for review: %s", newTask.Title))
+	}
+	if newTask.Status == "blocked" && oldTask.Status != "blocked" && newTask.AssigneeID != nil {
+		createNotification(&id, *newTask.AssigneeID, nil, "blocked", fmt.Sprintf("Task blocked: %s", newTask.BlockedReason))
+		db.Exec(context.Background(), "UPDATE agents SET status='blocked', current_activity=$1, health_note=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$3", "Blocked on task", newTask.BlockedReason, *newTask.AssigneeID)
+	}
 	if newTask.Description != oldTask.Description {
 		go logActivity(id, userID, "updated", "Updated task description")
 	}
-
 	go updateEmbedding(id, newTask.Title+" "+newTask.Description)
 	go broadcastUpdate("UPDATE")
 	return c.JSON(newTask)
@@ -962,7 +1092,7 @@ func searchTasks(c *fiber.Ctx) error {
 		return c.Status(500).SendString(err.Error())
 	}
 	rows, err := db.Query(context.Background(),
-		"SELECT id, board_id::text, title, description, list_id, position, assignee_id, parent_id FROM tasks ORDER BY embedding <=> $1 LIMIT 5",
+		"SELECT id, board_id::text, title, description, list_id, position, assignee_id, parent_id, status, blocked_reason FROM tasks ORDER BY embedding <=> $1 LIMIT 5",
 		pgvector(emb))
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
@@ -971,7 +1101,7 @@ func searchTasks(c *fiber.Ctx) error {
 	var tasks []Task
 	for rows.Next() {
 		var t Task
-		if err := rows.Scan(&t.ID, &t.BoardID, &t.Title, &t.Description, &t.ListID, &t.Position, &t.AssigneeID, &t.ParentID); err != nil {
+		if err := rows.Scan(&t.ID, &t.BoardID, &t.Title, &t.Description, &t.ListID, &t.Position, &t.AssigneeID, &t.ParentID, &t.Status, &t.BlockedReason); err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
 		tasks = append(tasks, t)
@@ -1218,4 +1348,78 @@ func createDeliverable(c *fiber.Ctx) error {
 
 	go logActivity(taskID, "system", "created_deliverable", fmt.Sprintf("Generated deliverable: %s", d.Title))
 	return c.JSON(d)
+}
+
+func getTaskRuns(c *fiber.Ctx) error {
+	taskID := c.Params("id")
+	rows, err := db.Query(context.Background(), "SELECT id, task_id, agent_id, session_key, provider_type, status, started_at, ended_at, current_activity, error_summary, result_summary FROM agent_runs WHERE task_id=$1 ORDER BY started_at DESC", taskID)
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+	defer rows.Close()
+	var runs []AgentRun
+	for rows.Next() {
+		var r AgentRun
+		if err := rows.Scan(&r.ID, &r.TaskID, &r.AgentID, &r.SessionKey, &r.ProviderType, &r.Status, &r.StartedAt, &r.EndedAt, &r.CurrentActivity, &r.ErrorSummary, &r.ResultSummary); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+		runs = append(runs, r)
+	}
+	if runs == nil { runs = []AgentRun{} }
+	return c.JSON(runs)
+}
+
+func getAgentRunsForAgent(c *fiber.Ctx) error {
+	agentID := c.Params("id")
+	rows, err := db.Query(context.Background(), "SELECT id, task_id, agent_id, session_key, provider_type, status, started_at, ended_at, current_activity, error_summary, result_summary FROM agent_runs WHERE agent_id=$1 ORDER BY started_at DESC LIMIT 20", agentID)
+	if err != nil { return c.Status(500).SendString(err.Error()) }
+	defer rows.Close()
+	var runs []AgentRun
+	for rows.Next() {
+		var r AgentRun
+		if err := rows.Scan(&r.ID, &r.TaskID, &r.AgentID, &r.SessionKey, &r.ProviderType, &r.Status, &r.StartedAt, &r.EndedAt, &r.CurrentActivity, &r.ErrorSummary, &r.ResultSummary); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+		runs = append(runs, r)
+	}
+	if runs == nil { runs = []AgentRun{} }
+	return c.JSON(runs)
+}
+
+func getAgentNotifications(c *fiber.Ctx) error {
+	agentID := c.Params("id")
+	rows, err := db.Query(context.Background(), "SELECT id, task_id, target_agent_id, source_agent_id, type, content, delivered, delivered_at, created_at FROM notifications WHERE target_agent_id=$1 ORDER BY created_at DESC LIMIT 30", agentID)
+	if err != nil { return c.Status(500).SendString(err.Error()) }
+	defer rows.Close()
+	var items []Notification
+	for rows.Next() {
+		var n Notification
+		if err := rows.Scan(&n.ID, &n.TaskID, &n.TargetAgentID, &n.SourceAgentID, &n.Type, &n.Content, &n.Delivered, &n.DeliveredAt, &n.CreatedAt); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+		items = append(items, n)
+	}
+	if items == nil { items = []Notification{} }
+	return c.JSON(items)
+}
+
+func heartbeatAgent(c *fiber.Ctx) error {
+	agentID := c.Params("id")
+	_, err := db.Exec(context.Background(), "UPDATE agents SET status='online', last_heartbeat_at=CURRENT_TIMESTAMP, last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$1", agentID)
+	if err != nil { return c.Status(500).SendString(err.Error()) }
+	return c.JSON(fiber.Map{"ok": true})
+}
+
+func updateAgentStatus(c *fiber.Ctx) error {
+	agentID := c.Params("id")
+	var payload struct {
+		Status string `json:"status"`
+		CurrentActivity string `json:"current_activity"`
+		HealthNote string `json:"health_note"`
+	}
+	if err := c.BodyParser(&payload); err != nil { return c.Status(400).SendString(err.Error()) }
+	if payload.Status == "" { payload.Status = "online" }
+	_, err := db.Exec(context.Background(), "UPDATE agents SET status=$1, current_activity=$2, health_note=$3, last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$4", payload.Status, payload.CurrentActivity, payload.HealthNote, agentID)
+	if err != nil { return c.Status(500).SendString(err.Error()) }
+	return c.JSON(fiber.Map{"ok": true})
 }
