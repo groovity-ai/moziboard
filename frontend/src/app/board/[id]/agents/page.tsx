@@ -7,6 +7,8 @@ import { MemberManager } from '@/components/MemberManager';
 import { useState } from 'react';
 import useSWR from 'swr';
 
+import { RegisterAgentModal } from '@/components/RegisterAgentModal';
+
 const fetcher = (url: string) => fetch(url).then((res) => res.json());
 
 type Agent = {
@@ -68,8 +70,9 @@ export default function AgentsPage() {
   const params = useParams();
   const id = params.id as string;
   const [showMembers, setShowMembers] = useState(false);
+  const [showRegister, setShowRegister] = useState(false);
 
-  const { data: agents } = useSWR<Agent[]>('/api/agents', fetcher, { refreshInterval: 10000 });
+  const { data: agents, mutate: mutateAgents } = useSWR<Agent[]>('/api/agents', fetcher, { refreshInterval: 10000 });
   const { data: tasks } = useSWR<Task[]>(`/api/boards/${id}/tasks`, fetcher, { refreshInterval: 10000 });
 
   const boardAgents = (agents || []).filter((agent) =>
@@ -88,6 +91,12 @@ export default function AgentsPage() {
           </h1>
         </div>
         <div className="flex gap-2">
+          <button
+            onClick={() => setShowRegister(true)}
+            className="flex items-center gap-2 rounded-lg bg-black text-white px-3 py-1.5 text-sm font-medium hover:bg-gray-800 dark:bg-white dark:text-black dark:hover:bg-gray-200"
+          >
+            + Connect Agent
+          </button>
           <button
             onClick={() => setShowMembers(true)}
             className="flex items-center gap-2 rounded-lg bg-gray-100 px-3 py-1.5 text-sm font-medium hover:bg-gray-200 dark:bg-zinc-800 dark:hover:bg-zinc-700"
@@ -121,6 +130,16 @@ export default function AgentsPage() {
       </div>
 
       <MemberManager boardId={id} isOpen={showMembers} onClose={() => setShowMembers(false)} />
+      
+      <RegisterAgentModal
+        boardId={id}
+        isOpen={showRegister}
+        onClose={() => setShowRegister(false)}
+        onSuccess={() => {
+          mutateAgents();
+          // Keep modal open to show token
+        }}
+      />
     </div>
   );
 }

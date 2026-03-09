@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -53,6 +57,13 @@ type Task struct {
 
 type Agent struct {
 	ID              string     `json:"id"`
+	DisplayName     string     `json:"display_name,omitempty"`
+	RoleName        string     `json:"role_name,omitempty"`
+	Avatar          string     `json:"avatar,omitempty"`
+	Provider        string     `json:"provider,omitempty"`
+	Engine          string     `json:"engine,omitempty"`
+	Description     string     `json:"description,omitempty"`
+	IsNativeClawn   bool       `json:"is_native_clawn"`
 	Soul            string     `json:"soul"`
 	Memory          string     `json:"memory"`
 	Rules           string     `json:"rules"`
@@ -67,6 +78,38 @@ type Agent struct {
 	HealthNote      string     `json:"health_note,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+type AgentConnector struct {
+	ID             int       `json:"id"`
+	AgentID        string    `json:"agent_id"`
+	ConnectorType  string    `json:"connector_type"`
+	AuthType       string    `json:"auth_type"`
+	EndpointURL    string    `json:"endpoint_url,omitempty"`
+	SessionKey     string    `json:"session_key,omitempty"`
+	Status         string    `json:"status"`
+	MetadataJSON   string    `json:"metadata_json,omitempty"`
+	LastSuccessAt  *time.Time `json:"last_success_at,omitempty"`
+	LastError      string    `json:"last_error,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type BoardAgent struct {
+	ID                   int       `json:"id"`
+	BoardID              string    `json:"board_id"`
+	AgentID              string    `json:"agent_id"`
+	BoardRole            string    `json:"board_role"`
+	Active               bool      `json:"active"`
+	AutoAcceptTasks      bool      `json:"auto_accept_tasks"`
+	CanComment           bool      `json:"can_comment"`
+	CanUpdateStatus      bool      `json:"can_update_status"`
+	CanAccessDocs        bool      `json:"can_access_docs"`
+	CanCreateDeliverables bool     `json:"can_create_deliverables"`
+	CapabilitiesJSON     string    `json:"capabilities_json,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
+	Agent                *Agent    `json:"agent,omitempty"`
 }
 
 type AgentRun struct {
@@ -93,6 +136,22 @@ type Notification struct {
 	Delivered     bool       `json:"delivered"`
 	DeliveredAt   *time.Time `json:"delivered_at,omitempty"`
 	CreatedAt     time.Time  `json:"created_at"`
+}
+
+type AgentEvent struct {
+	ID               int        `json:"id"`
+	AgentID          string     `json:"agent_id"`
+	BoardID          *string    `json:"board_id,omitempty"`
+	TaskID           *int       `json:"task_id,omitempty"`
+	EventType        string     `json:"event_type"`
+	PayloadJSON      string     `json:"payload_json"`
+	DeliveryStatus   string     `json:"delivery_status"`
+	DeliveryAttempts int        `json:"delivery_attempts"`
+	LastDeliveryAt   *time.Time `json:"last_delivery_at,omitempty"`
+	ResponseStatus   string     `json:"response_status,omitempty"`
+	ResponseBody     string     `json:"response_body,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	ProcessedAt      *time.Time `json:"processed_at,omitempty"`
 }
 
 type Deliverable struct {
@@ -125,6 +184,34 @@ type Activity struct {
 type BoardMemberReq struct {
 	MemberID string `json:"member_id"`
 	Role     string `json:"role"`
+}
+
+type AgentRegisterReq struct {
+	ID           string                 `json:"id"`
+	DisplayName  string                 `json:"display_name"`
+	RoleName     string                 `json:"role_name"`
+	Avatar       string                 `json:"avatar"`
+	Provider     string                 `json:"provider"`
+	Engine       string                 `json:"engine"`
+	Description  string                 `json:"description"`
+	IsNativeClawn bool                  `json:"is_native_clawn"`
+	Connector    AgentConnectorInput    `json:"connector"`
+	Capabilities map[string]interface{} `json:"capabilities"`
+}
+
+type AgentConnectorInput struct {
+	ConnectorType string                 `json:"connector_type"`
+	AuthType      string                 `json:"auth_type"`
+	EndpointURL   string                 `json:"endpoint_url"`
+	SessionKey    string                 `json:"session_key"`
+	Metadata      map[string]interface{} `json:"metadata"`
+}
+
+type AgentBoardConnectReq struct {
+	BoardID         string                 `json:"board_id"`
+	BoardRole       string                 `json:"board_role"`
+	AutoAcceptTasks *bool                  `json:"auto_accept_tasks"`
+	Permissions     map[string]interface{} `json:"permissions"`
 }
 
 type Document struct {
@@ -235,6 +322,13 @@ func initDB() {
 	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_run_id INT NULL")
 	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_activity TEXT DEFAULT ''")
 	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS health_note TEXT DEFAULT ''")
+	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS display_name TEXT DEFAULT ''")
+	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS role_name TEXT DEFAULT ''")
+	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar TEXT DEFAULT ''")
+	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS provider TEXT DEFAULT 'external'")
+	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS engine TEXT DEFAULT 'custom'")
+	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS description TEXT DEFAULT ''")
+	db.Exec(context.Background(), "ALTER TABLE agents ADD COLUMN IF NOT EXISTS is_native_clawn BOOLEAN DEFAULT false")
 
 	db.Exec(context.Background(), `
 	CREATE TABLE IF NOT EXISTS tasks (
@@ -334,6 +428,61 @@ func initDB() {
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);`)
 
+
+	db.Exec(context.Background(), `
+	CREATE TABLE IF NOT EXISTS agent_connectors (
+		id SERIAL PRIMARY KEY,
+		agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+		connector_type TEXT NOT NULL,
+		auth_type TEXT NOT NULL,
+		machine_token_hash TEXT DEFAULT '',
+		endpoint_url TEXT DEFAULT '',
+		session_key TEXT DEFAULT '',
+		shared_secret_hash TEXT DEFAULT '',
+		status TEXT DEFAULT 'pending',
+		metadata_json JSONB DEFAULT '{}'::jsonb,
+		last_success_at TIMESTAMP NULL,
+		last_error TEXT DEFAULT '',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);`)
+
+	db.Exec(context.Background(), `
+	CREATE TABLE IF NOT EXISTS board_agents (
+		id SERIAL PRIMARY KEY,
+		board_id UUID NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+		agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+		board_role TEXT DEFAULT 'worker',
+		active BOOLEAN DEFAULT true,
+		auto_accept_tasks BOOLEAN DEFAULT true,
+		can_comment BOOLEAN DEFAULT true,
+		can_update_status BOOLEAN DEFAULT true,
+		can_access_docs BOOLEAN DEFAULT true,
+		can_create_deliverables BOOLEAN DEFAULT true,
+		capabilities_json JSONB DEFAULT '{}'::jsonb,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE (board_id, agent_id)
+	);`)
+
+
+	db.Exec(context.Background(), `
+	CREATE TABLE IF NOT EXISTS agent_events (
+		id SERIAL PRIMARY KEY,
+		agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+		board_id UUID NULL REFERENCES boards(id) ON DELETE CASCADE,
+		task_id INT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+		event_type TEXT NOT NULL,
+		payload_json JSONB NOT NULL,
+		delivery_status TEXT DEFAULT 'pending',
+		delivery_attempts INT DEFAULT 0,
+		last_delivery_at TIMESTAMP NULL,
+		response_status TEXT DEFAULT '',
+		response_body TEXT DEFAULT '',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		processed_at TIMESTAMP NULL
+	);`)
+
 	seedMembers()
 	seedBoardMembers()
 
@@ -355,8 +504,8 @@ func seedMembers() {
 
 		if m.Role == "agent" {
 			db.Exec(context.Background(),
-				"INSERT INTO agents (id, soul, memory, rules, cron_schedule, status) VALUES ($1, $2, $3, $4, $5, 'offline') ON CONFLICT (id) DO NOTHING",
-				m.ID, "You are a helpful AI assistant in a software squad.", "No memories yet.", "Be concise.", "*/1 * * * *")
+				"INSERT INTO agents (id, display_name, role_name, avatar, provider, engine, description, is_native_clawn, soul, memory, rules, cron_schedule, status) VALUES ($1, $2, $3, $4, 'clawn', 'openclaw', '', true, $5, $6, $7, $8, 'offline') ON CONFLICT (id) DO UPDATE SET display_name=EXCLUDED.display_name, role_name=EXCLUDED.role_name, avatar=EXCLUDED.avatar, provider=EXCLUDED.provider, engine=EXCLUDED.engine, is_native_clawn=EXCLUDED.is_native_clawn",
+				m.ID, m.Name, m.Role, m.Avatar, "You are a helpful AI assistant in a software squad.", "No memories yet.", "Be concise.", "*/1 * * * *")
 		}
 	}
 }
@@ -502,6 +651,15 @@ func main() {
 	app.Get("/api/members", getMembers)
 	app.Get("/api/agents/:id", getAgentProfile)
 	app.Get("/api/agents", getAgents)
+	app.Post("/api/agents/register", registerAgent)
+	app.Post("/api/agents/:id/connect-board", connectAgentToBoard)
+	app.Get("/api/boards/:id/agents", getBoardAgents)
+	app.Post("/api/runtime/heartbeat", runtimeHeartbeat)
+	app.Post("/api/runtime/task-ack", runtimeTaskAck)
+	app.Post("/api/runtime/task-update", runtimeTaskUpdate)
+	app.Post("/api/runtime/task-comment", runtimeTaskComment)
+	app.Post("/api/runtime/task-deliverable", runtimeTaskDeliverable)
+	app.Post("/api/runtime/task-review-request", runtimeTaskReviewRequest)
 	app.Get("/api/agents/:id/runs", getAgentRunsForAgent)
 	app.Get("/api/agents/:id/notifications", getAgentNotifications)
 	app.Post("/api/agents/:id/heartbeat", heartbeatAgent)
@@ -531,15 +689,15 @@ func main() {
 func startDispatcher() {
 	log.Println("Starting Go native agent dispatcher...")
 
-	// Run polling as a background goroutine
 	go func() {
-		// Check immediately at startup
+		deliverPendingAgentEvents()
 		pollAgentTasks()
 
-		ticker := time.NewTicker(60 * time.Second)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 
 		for range ticker.C {
+			deliverPendingAgentEvents()
 			pollAgentTasks()
 		}
 	}()
@@ -650,16 +808,89 @@ func createNotification(taskID *int, targetAgentID string, sourceAgentID *string
 		taskID, targetAgentID, sourceAgentID, notifType, content)
 }
 
+func getConnectorForAgent(agentID string) (*AgentConnector, error) {
+	var conn AgentConnector
+	err := db.QueryRow(context.Background(), `SELECT id, agent_id, connector_type, auth_type, endpoint_url, session_key, status, metadata_json::text, last_success_at, last_error, created_at, updated_at FROM agent_connectors WHERE agent_id=$1 ORDER BY id ASC LIMIT 1`, agentID).
+		Scan(&conn.ID, &conn.AgentID, &conn.ConnectorType, &conn.AuthType, &conn.EndpointURL, &conn.SessionKey, &conn.Status, &conn.MetadataJSON, &conn.LastSuccessAt, &conn.LastError, &conn.CreatedAt, &conn.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &conn, nil
+}
+
 func createAgentRun(taskID int, agentID string, status string, activity string) *int {
+	conn, _ := getConnectorForAgent(agentID)
+	providerType := "internal"
+	sessionKey := fmt.Sprintf("mozi:%s:%d", agentID, taskID)
+	if conn != nil {
+		if conn.ConnectorType != "" { providerType = conn.ConnectorType }
+		if conn.SessionKey != "" { sessionKey = conn.SessionKey }
+	}
 	var runID int
 	err := db.QueryRow(context.Background(),
-		"INSERT INTO agent_runs (task_id, agent_id, session_key, provider_type, status, current_activity) VALUES ($1, $2, $3, 'openclaw', $4, $5) RETURNING id",
-		taskID, agentID, fmt.Sprintf("mozi:%s:%d", agentID, taskID), status, activity).Scan(&runID)
+		"INSERT INTO agent_runs (task_id, agent_id, session_key, provider_type, status, current_activity) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+		taskID, agentID, sessionKey, providerType, status, activity).Scan(&runID)
 	if err != nil {
 		log.Printf("failed to create agent run: %v", err)
 		return nil
 	}
 	return &runID
+}
+
+func enqueueAgentEvent(agentID string, taskID int, eventType string, payload map[string]interface{}) *int {
+	payloadBytes, _ := json.Marshal(payload)
+	var eventID int
+	var boardID string
+	_ = db.QueryRow(context.Background(), `SELECT board_id::text FROM tasks WHERE id=$1`, taskID).Scan(&boardID)
+	err := db.QueryRow(context.Background(), `INSERT INTO agent_events (agent_id, board_id, task_id, event_type, payload_json) VALUES ($1,$2,$3,$4,$5::jsonb) RETURNING id`, agentID, boardID, taskID, eventType, string(payloadBytes)).Scan(&eventID)
+	if err != nil {
+		log.Printf("failed to enqueue agent event: %v", err)
+		return nil
+	}
+	go deliverPendingAgentEvents()
+	return &eventID
+}
+
+func closeOtherRuns(taskID int, agentID string, keepRunID int) {
+	_, _ = db.Exec(context.Background(), `UPDATE agent_runs SET status='done', ended_at=CURRENT_TIMESTAMP WHERE task_id=$1 AND agent_id=$2 AND id<>$3 AND status IN ('queued','running','in_progress','blocked','review')`, taskID, agentID, keepRunID)
+}
+
+func generateMachineToken() (string, string, error) {
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", "", err
+	}
+	plain := "mb_rt_" + hex.EncodeToString(buf)
+	h := sha256.Sum256([]byte(plain))
+	return plain, hex.EncodeToString(h[:]), nil
+}
+
+func hashToken(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:])
+}
+
+func extractBearerToken(c *fiber.Ctx) string {
+	auth := c.Get("Authorization")
+	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		return strings.TrimSpace(auth[7:])
+	}
+	return ""
+}
+
+func resolveRuntimeAgent(c *fiber.Ctx) (*AgentConnector, error) {
+	token := extractBearerToken(c)
+	if token == "" {
+		return nil, fmt.Errorf("missing bearer token")
+	}
+	hash := hashToken(token)
+	var conn AgentConnector
+	err := db.QueryRow(context.Background(), `SELECT id, agent_id, connector_type, auth_type, endpoint_url, session_key, status, metadata_json::text, last_success_at, last_error, created_at, updated_at FROM agent_connectors WHERE machine_token_hash=$1`, hash).
+		Scan(&conn.ID, &conn.AgentID, &conn.ConnectorType, &conn.AuthType, &conn.EndpointURL, &conn.SessionKey, &conn.Status, &conn.MetadataJSON, &conn.LastSuccessAt, &conn.LastError, &conn.CreatedAt, &conn.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &conn, nil
 }
 
 func getBoards(c *fiber.Ctx) error {
@@ -742,7 +973,7 @@ func getMembers(c *fiber.Ctx) error {
 }
 
 func getAgents(c *fiber.Ctx) error {
-	rows, err := db.Query(context.Background(), "SELECT id, soul, memory, rules, cron_schedule, active, status, last_heartbeat_at, last_seen_at, current_task_id, current_run_id, current_activity, health_note, created_at, updated_at FROM agents")
+	rows, err := db.Query(context.Background(), "SELECT id, display_name, role_name, avatar, provider, engine, description, is_native_clawn, soul, memory, rules, cron_schedule, active, status, last_heartbeat_at, last_seen_at, current_task_id, current_run_id, current_activity, health_note, created_at, updated_at FROM agents")
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
@@ -750,7 +981,7 @@ func getAgents(c *fiber.Ctx) error {
 	var agents []Agent
 	for rows.Next() {
 		var a Agent
-		if err := rows.Scan(&a.ID, &a.Soul, &a.Memory, &a.Rules, &a.CronSchedule, &a.Active, &a.Status, &a.LastHeartbeatAt, &a.LastSeenAt, &a.CurrentTaskID, &a.CurrentRunID, &a.CurrentActivity, &a.HealthNote, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.DisplayName, &a.RoleName, &a.Avatar, &a.Provider, &a.Engine, &a.Description, &a.IsNativeClawn, &a.Soul, &a.Memory, &a.Rules, &a.CronSchedule, &a.Active, &a.Status, &a.LastHeartbeatAt, &a.LastSeenAt, &a.CurrentTaskID, &a.CurrentRunID, &a.CurrentActivity, &a.HealthNote, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
 		agents = append(agents, a)
@@ -765,12 +996,299 @@ func getAgentProfile(c *fiber.Ctx) error {
 	agentID := c.Params("id")
 	var a Agent
 	err := db.QueryRow(context.Background(),
-		"SELECT id, soul, memory, rules, cron_schedule, active, status, last_heartbeat_at, last_seen_at, current_task_id, current_run_id, current_activity, health_note, created_at, updated_at FROM agents WHERE id=$1",
-		agentID).Scan(&a.ID, &a.Soul, &a.Memory, &a.Rules, &a.CronSchedule, &a.Active, &a.Status, &a.LastHeartbeatAt, &a.LastSeenAt, &a.CurrentTaskID, &a.CurrentRunID, &a.CurrentActivity, &a.HealthNote, &a.CreatedAt, &a.UpdatedAt)
+		"SELECT id, display_name, role_name, avatar, provider, engine, description, is_native_clawn, soul, memory, rules, cron_schedule, active, status, last_heartbeat_at, last_seen_at, current_task_id, current_run_id, current_activity, health_note, created_at, updated_at FROM agents WHERE id=$1",
+		agentID).Scan(&a.ID, &a.DisplayName, &a.RoleName, &a.Avatar, &a.Provider, &a.Engine, &a.Description, &a.IsNativeClawn, &a.Soul, &a.Memory, &a.Rules, &a.CronSchedule, &a.Active, &a.Status, &a.LastHeartbeatAt, &a.LastSeenAt, &a.CurrentTaskID, &a.CurrentRunID, &a.CurrentActivity, &a.HealthNote, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return c.Status(404).SendString("Agent not found")
 	}
 	return c.JSON(a)
+}
+
+func registerAgent(c *fiber.Ctx) error {
+	req := new(AgentRegisterReq)
+	if err := c.BodyParser(req); err != nil {
+		return c.Status(400).SendString(err.Error())
+	}
+	if req.ID == "" || req.DisplayName == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "id and display_name are required"})
+	}
+	if req.RoleName == "" { req.RoleName = "Agent" }
+	if req.Avatar == "" { req.Avatar = "🤖" }
+	if req.Provider == "" { req.Provider = "external" }
+	if req.Engine == "" { req.Engine = "custom" }
+	if req.Connector.ConnectorType == "" { req.Connector.ConnectorType = "custom" }
+	if req.Connector.AuthType == "" { req.Connector.AuthType = "machine_token" }
+	if req.Capabilities == nil { req.Capabilities = map[string]interface{}{} }
+	metaBytes, _ := json.Marshal(req.Connector.Metadata)
+	capBytes, _ := json.Marshal(req.Capabilities)
+	plainToken, tokenHash, err := generateMachineToken()
+	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
+	_, err = db.Exec(context.Background(), `INSERT INTO members (id, name, role, avatar) VALUES ($1,$2,'agent',$3) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, role='agent', avatar=EXCLUDED.avatar`, req.ID, req.DisplayName, req.Avatar)
+	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
+	_, err = db.Exec(context.Background(), `INSERT INTO agents (id, display_name, role_name, avatar, provider, engine, description, is_native_clawn, soul, memory, rules, cron_schedule, active, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'','', '', '*/10 * * * *', true, 'offline') ON CONFLICT (id) DO UPDATE SET display_name=EXCLUDED.display_name, role_name=EXCLUDED.role_name, avatar=EXCLUDED.avatar, provider=EXCLUDED.provider, engine=EXCLUDED.engine, description=EXCLUDED.description, is_native_clawn=EXCLUDED.is_native_clawn, updated_at=CURRENT_TIMESTAMP`, req.ID, req.DisplayName, req.RoleName, req.Avatar, req.Provider, req.Engine, req.Description, req.IsNativeClawn)
+	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
+	var connectorID int
+	err = db.QueryRow(context.Background(), `INSERT INTO agent_connectors (agent_id, connector_type, auth_type, machine_token_hash, endpoint_url, session_key, status, metadata_json) VALUES ($1,$2,$3,$4,$5,$6,'connected',$7::jsonb) RETURNING id`, req.ID, req.Connector.ConnectorType, req.Connector.AuthType, tokenHash, req.Connector.EndpointURL, req.Connector.SessionKey, string(metaBytes)).Scan(&connectorID)
+	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
+	_ = capBytes
+	return c.JSON(fiber.Map{"agent": fiber.Map{"id": req.ID, "display_name": req.DisplayName, "provider": req.Provider, "engine": req.Engine}, "connector": fiber.Map{"id": connectorID, "connector_type": req.Connector.ConnectorType, "status": "connected"}, "machine_token": plainToken})
+}
+
+func connectAgentToBoard(c *fiber.Ctx) error {
+	agentID := c.Params("id")
+	req := new(AgentBoardConnectReq)
+	if err := c.BodyParser(req); err != nil { return c.Status(400).SendString(err.Error()) }
+	if req.BoardID == "" { return c.Status(400).JSON(fiber.Map{"error": "board_id is required"}) }
+	if req.BoardRole == "" { req.BoardRole = "worker" }
+	autoAccept := true
+	if req.AutoAcceptTasks != nil { autoAccept = *req.AutoAcceptTasks }
+	canComment, canUpdate, canDocs, canDeliv := true, true, true, true
+	if req.Permissions != nil {
+		if v, ok := req.Permissions["can_comment"].(bool); ok { canComment = v }
+		if v, ok := req.Permissions["can_update_status"].(bool); ok { canUpdate = v }
+		if v, ok := req.Permissions["can_access_docs"].(bool); ok { canDocs = v }
+		if v, ok := req.Permissions["can_create_deliverables"].(bool); ok { canDeliv = v }
+	}
+	capBytes, _ := json.Marshal(req.Permissions)
+	var id int
+	err := db.QueryRow(context.Background(), `INSERT INTO board_agents (board_id, agent_id, board_role, active, auto_accept_tasks, can_comment, can_update_status, can_access_docs, can_create_deliverables, capabilities_json) VALUES ($1,$2,$3,true,$4,$5,$6,$7,$8,$9::jsonb) ON CONFLICT (board_id, agent_id) DO UPDATE SET board_role=EXCLUDED.board_role, active=true, auto_accept_tasks=EXCLUDED.auto_accept_tasks, can_comment=EXCLUDED.can_comment, can_update_status=EXCLUDED.can_update_status, can_access_docs=EXCLUDED.can_access_docs, can_create_deliverables=EXCLUDED.can_create_deliverables, capabilities_json=EXCLUDED.capabilities_json, updated_at=CURRENT_TIMESTAMP RETURNING id`, req.BoardID, agentID, req.BoardRole, autoAccept, canComment, canUpdate, canDocs, canDeliv, string(capBytes)).Scan(&id)
+	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
+	_, _ = db.Exec(context.Background(), `INSERT INTO board_members (board_id, member_id, role) VALUES ($1,$2,'agent') ON CONFLICT DO NOTHING`, req.BoardID, agentID)
+	return c.JSON(fiber.Map{"ok": true, "board_agent_id": id})
+}
+
+func getBoardAgents(c *fiber.Ctx) error {
+	boardID := c.Params("id")
+	rows, err := db.Query(context.Background(), `SELECT ba.id, ba.board_id::text, ba.agent_id, ba.board_role, ba.active, ba.auto_accept_tasks, ba.can_comment, ba.can_update_status, ba.can_access_docs, ba.can_create_deliverables, ba.capabilities_json::text, ba.created_at, ba.updated_at, a.display_name, a.role_name, a.avatar, a.provider, a.engine, a.description, a.is_native_clawn, a.status, a.last_heartbeat_at, a.last_seen_at, a.current_task_id, a.current_run_id, a.current_activity, a.health_note, a.soul, a.memory, a.rules, a.cron_schedule, a.active, a.created_at, a.updated_at FROM board_agents ba JOIN agents a ON a.id = ba.agent_id WHERE ba.board_id=$1 ORDER BY ba.created_at ASC`, boardID)
+	if err != nil { return c.Status(500).SendString(err.Error()) }
+	defer rows.Close()
+	var result []BoardAgent
+	for rows.Next() {
+		var ba BoardAgent
+		var ag Agent
+		if err := rows.Scan(&ba.ID, &ba.BoardID, &ba.AgentID, &ba.BoardRole, &ba.Active, &ba.AutoAcceptTasks, &ba.CanComment, &ba.CanUpdateStatus, &ba.CanAccessDocs, &ba.CanCreateDeliverables, &ba.CapabilitiesJSON, &ba.CreatedAt, &ba.UpdatedAt, &ag.DisplayName, &ag.RoleName, &ag.Avatar, &ag.Provider, &ag.Engine, &ag.Description, &ag.IsNativeClawn, &ag.Status, &ag.LastHeartbeatAt, &ag.LastSeenAt, &ag.CurrentTaskID, &ag.CurrentRunID, &ag.CurrentActivity, &ag.HealthNote, &ag.Soul, &ag.Memory, &ag.Rules, &ag.CronSchedule, &ag.Active, &ag.CreatedAt, &ag.UpdatedAt); err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+		ag.ID = ba.AgentID
+		ba.Agent = &ag
+		result = append(result, ba)
+	}
+	if result == nil { result = []BoardAgent{} }
+	return c.JSON(result)
+}
+
+type RuntimeTaskRef struct {
+	TaskID int `json:"task_id"`
+}
+
+type RuntimeHeartbeatReq struct {
+	Status string `json:"status"`
+	CurrentActivity string `json:"current_activity"`
+	CurrentTaskID *int `json:"current_task_id"`
+}
+
+type RuntimeTaskAckReq struct {
+	TaskID int `json:"task_id"`
+	Message string `json:"message"`
+}
+
+type RuntimeTaskUpdateReq struct {
+	TaskID int `json:"task_id"`
+	Status string `json:"status"`
+	ProgressMessage string `json:"progress_message"`
+	CurrentActivity string `json:"current_activity"`
+	BlockedReason string `json:"blocked_reason"`
+}
+
+type RuntimeTaskCommentReq struct {
+	TaskID int `json:"task_id"`
+	Content string `json:"content"`
+	MessageType string `json:"message_type"`
+}
+
+type RuntimeTaskDeliverableReq struct {
+	TaskID int `json:"task_id"`
+	Title string `json:"title"`
+	ArtifactType string `json:"artifact_type"`
+	Content string `json:"content"`
+	Summary string `json:"summary"`
+}
+
+type RuntimeTaskReviewReq struct {
+	TaskID int `json:"task_id"`
+	Summary string `json:"summary"`
+}
+
+func ensureAgentBoardAccess(agentID string, taskID int) error {
+	var ok bool
+	err := db.QueryRow(context.Background(), `SELECT EXISTS(SELECT 1 FROM tasks t JOIN board_agents ba ON ba.board_id = t.board_id AND ba.agent_id=$1 AND ba.active=true WHERE t.id=$2)`, agentID, taskID).Scan(&ok)
+	if err != nil { return err }
+	if !ok { return fmt.Errorf("agent not connected to task board") }
+	return nil
+}
+
+func ensureActiveRun(taskID int, agentID string) (int, error) {
+	rows, err := db.Query(context.Background(), `SELECT id FROM agent_runs WHERE task_id=$1 AND agent_id=$2 AND status IN ('queued','running','in_progress','blocked','review') ORDER BY started_at DESC`, taskID, agentID)
+	if err != nil { return 0, err }
+	defer rows.Close()
+	var ids []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err == nil { ids = append(ids, id) }
+	}
+	if len(ids) > 0 {
+		keep := ids[0]
+		closeOtherRuns(taskID, agentID, keep)
+		return keep, nil
+	}
+	created := createAgentRun(taskID, agentID, "running", "Started work")
+	if created == nil { return 0, fmt.Errorf("failed to create run") }
+	return *created, nil
+}
+
+func runtimeHeartbeat(c *fiber.Ctx) error {
+	conn, err := resolveRuntimeAgent(c)
+	if err != nil { return c.Status(401).JSON(fiber.Map{"error": err.Error()}) }
+	var req RuntimeHeartbeatReq
+	if err := c.BodyParser(&req); err != nil { return c.Status(400).SendString(err.Error()) }
+	if req.Status == "" { req.Status = "online" }
+	_, err = db.Exec(context.Background(), `UPDATE agents SET status=$1, current_activity=$2, current_task_id=COALESCE($3, current_task_id), last_heartbeat_at=CURRENT_TIMESTAMP, last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$4`, req.Status, req.CurrentActivity, req.CurrentTaskID, conn.AgentID)
+	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
+	_, _ = db.Exec(context.Background(), `UPDATE agent_connectors SET last_success_at=CURRENT_TIMESTAMP, status='connected', updated_at=CURRENT_TIMESTAMP WHERE id=$1`, conn.ID)
+	return c.JSON(fiber.Map{"ok": true, "agent_id": conn.AgentID})
+}
+
+func runtimeTaskAck(c *fiber.Ctx) error {
+	conn, err := resolveRuntimeAgent(c)
+	if err != nil { return c.Status(401).JSON(fiber.Map{"error": err.Error()}) }
+	var req RuntimeTaskAckReq
+	if err := c.BodyParser(&req); err != nil { return c.Status(400).SendString(err.Error()) }
+	if err := ensureAgentBoardAccess(conn.AgentID, req.TaskID); err != nil { return c.Status(403).JSON(fiber.Map{"error": err.Error()}) }
+	runID, err := ensureActiveRun(req.TaskID, conn.AgentID)
+	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
+	msg := req.Message
+	if msg == "" { msg = "Task accepted, starting work." }
+	_, _ = db.Exec(context.Background(), `INSERT INTO comments (task_id, user_id, content) VALUES ($1,$2,$3)`, req.TaskID, conn.AgentID, msg)
+	_, _ = db.Exec(context.Background(), `UPDATE tasks SET status='in_progress', list_id='doing' WHERE id=$1 AND status IN ('todo','assigned')`, req.TaskID)
+	_, _ = db.Exec(context.Background(), `UPDATE agent_runs SET status='running', current_activity='Working on task' WHERE id=$1`, runID)
+	_, _ = db.Exec(context.Background(), `UPDATE agents SET status='busy', current_task_id=$1, current_run_id=$2, current_activity='Working on task', last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$3`, req.TaskID, runID, conn.AgentID)
+	go logActivity(req.TaskID, conn.AgentID, "acknowledged", msg)
+	go broadcastUpdate("UPDATE")
+	return c.JSON(fiber.Map{"ok": true, "run_id": runID})
+}
+
+func runtimeTaskUpdate(c *fiber.Ctx) error {
+	conn, err := resolveRuntimeAgent(c)
+	if err != nil { return c.Status(401).JSON(fiber.Map{"error": err.Error()}) }
+	var req RuntimeTaskUpdateReq
+	if err := c.BodyParser(&req); err != nil { return c.Status(400).SendString(err.Error()) }
+	if err := ensureAgentBoardAccess(conn.AgentID, req.TaskID); err != nil { return c.Status(403).JSON(fiber.Map{"error": err.Error()}) }
+	if req.Status == "" { req.Status = "in_progress" }
+	listID := statusToListID(req.Status)
+	runID, err := ensureActiveRun(req.TaskID, conn.AgentID)
+	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
+	_, err = db.Exec(context.Background(), `UPDATE tasks SET status=$1, list_id=$2, blocked_reason=$3 WHERE id=$4`, req.Status, listID, req.BlockedReason, req.TaskID)
+	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
+	if req.ProgressMessage != "" { _, _ = db.Exec(context.Background(), `INSERT INTO comments (task_id, user_id, content) VALUES ($1,$2,$3)`, req.TaskID, conn.AgentID, req.ProgressMessage) }
+	_, _ = db.Exec(context.Background(), `UPDATE agent_runs SET status=$1, current_activity=$2, error_summary=CASE WHEN $1='blocked' THEN $3 ELSE error_summary END WHERE id=$4`, req.Status, req.CurrentActivity, req.BlockedReason, runID)
+	agentStatus := "busy"
+	if req.Status == "blocked" { agentStatus = "blocked" }
+	_, _ = db.Exec(context.Background(), `UPDATE agents SET status=$1, current_task_id=$2, current_run_id=$3, current_activity=$4, health_note=$5, last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$6`, agentStatus, req.TaskID, runID, req.CurrentActivity, req.BlockedReason, conn.AgentID)
+	if req.Status == "blocked" { createNotification(&req.TaskID, conn.AgentID, nil, "blocked", req.BlockedReason) }
+	go logActivity(req.TaskID, conn.AgentID, "runtime_update", fmt.Sprintf("Status updated to %s", req.Status))
+	go broadcastUpdate("UPDATE")
+	return c.JSON(fiber.Map{"ok": true, "run_id": runID})
+}
+
+func runtimeTaskComment(c *fiber.Ctx) error {
+	conn, err := resolveRuntimeAgent(c)
+	if err != nil { return c.Status(401).JSON(fiber.Map{"error": err.Error()}) }
+	var req RuntimeTaskCommentReq
+	if err := c.BodyParser(&req); err != nil { return c.Status(400).SendString(err.Error()) }
+	if err := ensureAgentBoardAccess(conn.AgentID, req.TaskID); err != nil { return c.Status(403).JSON(fiber.Map{"error": err.Error()}) }
+	_, err = db.Exec(context.Background(), `INSERT INTO comments (task_id, user_id, content) VALUES ($1,$2,$3)`, req.TaskID, conn.AgentID, req.Content)
+	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
+	go logActivity(req.TaskID, conn.AgentID, "commented", req.Content)
+	go broadcastUpdate("UPDATE")
+	return c.JSON(fiber.Map{"ok": true})
+}
+
+func runtimeTaskDeliverable(c *fiber.Ctx) error {
+	conn, err := resolveRuntimeAgent(c)
+	if err != nil { return c.Status(401).JSON(fiber.Map{"error": err.Error()}) }
+	var req RuntimeTaskDeliverableReq
+	if err := c.BodyParser(&req); err != nil { return c.Status(400).SendString(err.Error()) }
+	if err := ensureAgentBoardAccess(conn.AgentID, req.TaskID); err != nil { return c.Status(403).JSON(fiber.Map{"error": err.Error()}) }
+	_, err = db.Exec(context.Background(), `INSERT INTO deliverables (task_id, title, description, artifact_type, content) VALUES ($1,$2,$3,$4,$5)`, req.TaskID, req.Title, req.Summary, req.ArtifactType, req.Content)
+	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
+	runID, _ := ensureActiveRun(req.TaskID, conn.AgentID)
+	_, _ = db.Exec(context.Background(), `UPDATE agent_runs SET result_summary=$1 WHERE id=$2`, req.Summary, runID)
+	go logActivity(req.TaskID, conn.AgentID, "deliverable", fmt.Sprintf("Submitted deliverable: %s", req.Title))
+	go broadcastUpdate("UPDATE")
+	return c.JSON(fiber.Map{"ok": true, "run_id": runID})
+}
+
+func runtimeTaskReviewRequest(c *fiber.Ctx) error {
+	conn, err := resolveRuntimeAgent(c)
+	if err != nil { return c.Status(401).JSON(fiber.Map{"error": err.Error()}) }
+	var req RuntimeTaskReviewReq
+	if err := c.BodyParser(&req); err != nil { return c.Status(400).SendString(err.Error()) }
+	if err := ensureAgentBoardAccess(conn.AgentID, req.TaskID); err != nil { return c.Status(403).JSON(fiber.Map{"error": err.Error()}) }
+	runID, _ := ensureActiveRun(req.TaskID, conn.AgentID)
+	_, _ = db.Exec(context.Background(), `UPDATE tasks SET status='review', list_id='qa' WHERE id=$1`, req.TaskID)
+	_, _ = db.Exec(context.Background(), `UPDATE agent_runs SET status='review', result_summary=$1 WHERE id=$2`, req.Summary, runID)
+	_, _ = db.Exec(context.Background(), `UPDATE agents SET status='online', current_activity='Waiting for review', last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$1`, conn.AgentID)
+	if req.Summary != "" { _, _ = db.Exec(context.Background(), `INSERT INTO comments (task_id, user_id, content) VALUES ($1,$2,$3)`, req.TaskID, conn.AgentID, req.Summary) }
+	go logActivity(req.TaskID, conn.AgentID, "review_requested", req.Summary)
+	go broadcastUpdate("UPDATE")
+	return c.JSON(fiber.Map{"ok": true, "run_id": runID})
+}
+
+func deliverPendingAgentEvents() {
+	rows, err := db.Query(context.Background(), `SELECT id, agent_id, board_id::text, task_id, event_type, payload_json::text, delivery_status, delivery_attempts, last_delivery_at, response_status, response_body, created_at, processed_at FROM agent_events WHERE delivery_status IN ('pending','failed') ORDER BY created_at ASC LIMIT 20`)
+	if err != nil {
+		log.Printf("event query failed: %v", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ev AgentEvent
+		if err := rows.Scan(&ev.ID, &ev.AgentID, &ev.BoardID, &ev.TaskID, &ev.EventType, &ev.PayloadJSON, &ev.DeliveryStatus, &ev.DeliveryAttempts, &ev.LastDeliveryAt, &ev.ResponseStatus, &ev.ResponseBody, &ev.CreatedAt, &ev.ProcessedAt); err != nil {
+			log.Printf("event scan failed: %v", err)
+			continue
+		}
+		conn, err := getConnectorForAgent(ev.AgentID)
+		if err != nil || conn == nil {
+			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status='connector_missing', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
+			continue
+		}
+		if conn.ConnectorType != "webhook" || conn.EndpointURL == "" {
+			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='ignored', response_status=$2, processed_at=CURRENT_TIMESTAMP, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, conn.ConnectorType)
+			continue
+		}
+		req, err := http.NewRequest("POST", conn.EndpointURL, strings.NewReader(ev.PayloadJSON))
+		if err != nil {
+			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status=$2, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, err.Error())
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{Timeout: 8 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status=$2, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, err.Error())
+			continue
+		}
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1000))
+		resp.Body.Close()
+		status := "failed"
+		processedAt := "NULL"
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			status = "sent"
+			processedAt = "CURRENT_TIMESTAMP"
+		}
+		query := fmt.Sprintf(`UPDATE agent_events SET delivery_status=$2, delivery_attempts=delivery_attempts+1, last_delivery_at=CURRENT_TIMESTAMP, response_status=$3, response_body=$4, processed_at=%s WHERE id=$1`, processedAt)
+		_, _ = db.Exec(context.Background(), query, ev.ID, status, resp.Status, string(bodyBytes))
+	}
 }
 
 // getAiAgenzProjects proxies a request to the main AiAgenz backend to fetch the user's projects (agents).
@@ -966,6 +1484,7 @@ func createTask(c *fiber.Ctx) error {
 		if runID := createAgentRun(id, *t.AssigneeID, "queued", "Awaiting pickup"); runID != nil {
 			db.Exec(context.Background(), "UPDATE agents SET current_task_id=$1, current_run_id=$2, status='busy', current_activity=$3, last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$4", id, *runID, "Queued on task", *t.AssigneeID)
 		}
+		enqueueAgentEvent(*t.AssigneeID, id, "task.assigned", map[string]interface{}{"task_id": id, "title": t.Title, "status": t.Status, "board_id": t.BoardID})
 	}
 
 	go logActivity(id, "system", "created", fmt.Sprintf("Task created with status %s", t.Status))
@@ -1022,6 +1541,7 @@ func updateTask(c *fiber.Ctx) error {
 			if runID := createAgentRun(id, newAssignee, "queued", "Awaiting pickup"); runID != nil {
 				db.Exec(context.Background(), "UPDATE agents SET current_task_id=$1, current_run_id=$2, status='busy', current_activity=$3, last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$4", id, *runID, "Queued on task", newAssignee)
 			}
+			enqueueAgentEvent(newAssignee, id, "task.assigned", map[string]interface{}{"task_id": id, "title": newTask.Title, "status": newTask.Status, "board_id": newTask.BoardID})
 		} else {
 			go logActivity(id, userID, "unassigned", "Removed assignee")
 		}
