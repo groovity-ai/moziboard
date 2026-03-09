@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"context"
@@ -211,6 +212,7 @@ type AgentConnectorInput struct {
 	BaseURL       string                 `json:"base_url"`
 	AgentRef      string                 `json:"agent_ref"`
 	SessionKey    string                 `json:"session_key"`
+	SharedSecret  string                 `json:"shared_secret"`
 	Metadata      map[string]interface{} `json:"metadata"`
 }
 
@@ -911,6 +913,14 @@ func hashToken(token string) string {
 	return hex.EncodeToString(h[:])
 }
 
+func signWebhookPayload(secret string, timestamp string, body string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(timestamp))
+	mac.Write([]byte("."))
+	mac.Write([]byte(body))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 func extractBearerToken(c *fiber.Ctx) string {
 	auth := c.Get("Authorization")
 	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
@@ -928,8 +938,42 @@ func resolveRuntimeAgent(c *fiber.Ctx) (*AgentConnector, error) {
 	var conn AgentConnector
 	err := db.QueryRow(context.Background(), `SELECT id, agent_id, connector_type, transport_mode, auth_type, endpoint_url, base_url, agent_ref, session_key, status, metadata_json::text, last_success_at, last_error, created_at, updated_at FROM agent_connectors WHERE machine_token_hash=$1`, hash).
 		Scan(&conn.ID, &conn.AgentID, &conn.ConnectorType, &conn.TransportMode, &conn.AuthType, &conn.EndpointURL, &conn.BaseURL, &conn.AgentRef, &conn.SessionKey, &conn.Status, &conn.MetadataJSON, &conn.LastSuccessAt, &conn.LastError, &conn.CreatedAt, &conn.UpdatedAt)
+	if err == nil {
+		return &conn, nil
+	}
+
+	agentRef := strings.TrimSpace(c.Get("X-Mozi-Agent-Ref"))
+	sharedSecret := strings.TrimSpace(c.Get("X-Mozi-Shared-Secret"))
+	timestamp := strings.TrimSpace(c.Get("X-Mozi-Timestamp"))
+	signature := strings.TrimSpace(c.Get("X-Mozi-Signature"))
+	if agentRef == "" || sharedSecret == "" {
+		return nil, err
+	}
+	var sharedSecretHash string
+	err = db.QueryRow(context.Background(), `SELECT id, agent_id, connector_type, transport_mode, auth_type, endpoint_url, base_url, agent_ref, session_key, status, metadata_json::text, last_success_at, last_error, created_at, updated_at, shared_secret_hash FROM agent_connectors WHERE agent_ref=$1 AND auth_type='shared_secret' AND status='connected' ORDER BY updated_at DESC, id DESC LIMIT 1`, agentRef).
+		Scan(&conn.ID, &conn.AgentID, &conn.ConnectorType, &conn.TransportMode, &conn.AuthType, &conn.EndpointURL, &conn.BaseURL, &conn.AgentRef, &conn.SessionKey, &conn.Status, &conn.MetadataJSON, &conn.LastSuccessAt, &conn.LastError, &conn.CreatedAt, &conn.UpdatedAt, &sharedSecretHash)
 	if err != nil {
 		return nil, err
+	}
+	if hashToken(sharedSecret) != sharedSecretHash {
+		return nil, fmt.Errorf("invalid shared secret")
+	}
+	if timestamp != "" || signature != "" {
+		if timestamp == "" || signature == "" {
+			return nil, fmt.Errorf("incomplete signature headers")
+		}
+		parsedTs, parseErr := time.Parse(time.RFC3339, timestamp)
+		if parseErr != nil {
+			return nil, fmt.Errorf("invalid signature timestamp")
+		}
+		if time.Since(parsedTs) > 5*time.Minute || time.Until(parsedTs) > 1*time.Minute {
+			return nil, fmt.Errorf("signature timestamp out of range")
+		}
+		body := string(c.Body())
+		expected := signWebhookPayload(sharedSecret, timestamp, body)
+		if !hmac.Equal([]byte(expected), []byte(signature)) {
+			return nil, fmt.Errorf("invalid shared secret signature")
+		}
 	}
 	return &conn, nil
 }
@@ -1071,12 +1115,16 @@ func registerAgent(c *fiber.Ctx) error {
 	capBytes, _ := json.Marshal(req.Capabilities)
 	plainToken, tokenHash, err := generateMachineToken()
 	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
+	sharedSecretHash := ""
+	if strings.TrimSpace(req.Connector.SharedSecret) != "" {
+		sharedSecretHash = hashToken(strings.TrimSpace(req.Connector.SharedSecret))
+	}
 	_, err = db.Exec(context.Background(), `INSERT INTO members (id, name, role, avatar) VALUES ($1,$2,'agent',$3) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, role='agent', avatar=EXCLUDED.avatar`, req.ID, req.DisplayName, req.Avatar)
 	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
 	_, err = db.Exec(context.Background(), `INSERT INTO agents (id, display_name, role_name, avatar, provider, engine, description, is_native_clawn, soul, memory, rules, cron_schedule, active, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'','', '', '*/10 * * * *', true, 'offline') ON CONFLICT (id) DO UPDATE SET display_name=EXCLUDED.display_name, role_name=EXCLUDED.role_name, avatar=EXCLUDED.avatar, provider=EXCLUDED.provider, engine=EXCLUDED.engine, description=EXCLUDED.description, is_native_clawn=EXCLUDED.is_native_clawn, updated_at=CURRENT_TIMESTAMP`, req.ID, req.DisplayName, req.RoleName, req.Avatar, req.Provider, req.Engine, req.Description, req.IsNativeClawn)
 	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
 	var connectorID int
-	err = db.QueryRow(context.Background(), `INSERT INTO agent_connectors (agent_id, connector_type, transport_mode, auth_type, machine_token_hash, endpoint_url, base_url, agent_ref, session_key, status, metadata_json) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'connected',$10::jsonb) RETURNING id`, req.ID, req.Connector.ConnectorType, req.Connector.TransportMode, req.Connector.AuthType, tokenHash, req.Connector.EndpointURL, req.Connector.BaseURL, req.Connector.AgentRef, req.Connector.SessionKey, string(metaBytes)).Scan(&connectorID)
+	err = db.QueryRow(context.Background(), `INSERT INTO agent_connectors (agent_id, connector_type, transport_mode, auth_type, machine_token_hash, endpoint_url, base_url, agent_ref, session_key, shared_secret_hash, status, metadata_json) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'connected',$11::jsonb) RETURNING id`, req.ID, req.Connector.ConnectorType, req.Connector.TransportMode, req.Connector.AuthType, tokenHash, req.Connector.EndpointURL, req.Connector.BaseURL, req.Connector.AgentRef, req.Connector.SessionKey, sharedSecretHash, string(metaBytes)).Scan(&connectorID)
 	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
 	_ = capBytes
 	return c.JSON(fiber.Map{"agent": fiber.Map{"id": req.ID, "display_name": req.DisplayName, "provider": req.Provider, "engine": req.Engine}, "connector": fiber.Map{"id": connectorID, "connector_type": req.Connector.ConnectorType, "transport_mode": req.Connector.TransportMode, "base_url": req.Connector.BaseURL, "agent_ref": req.Connector.AgentRef, "status": "connected"}, "machine_token": plainToken})
@@ -1441,6 +1489,7 @@ func markEventFailed(ev AgentEvent, responseStatus string, responseBody string) 
 }
 
 func deliverEventHTTPRequest(ev AgentEvent, conn *AgentConnector, targetURL string, body string, headers map[string]string, strategy string) {
+	timestamp := time.Now().UTC().Format(time.RFC3339)
 	req, err := http.NewRequest("POST", targetURL, strings.NewReader(body))
 	if err != nil {
 		markEventFailed(ev, err.Error(), "")
@@ -1449,6 +1498,18 @@ func deliverEventHTTPRequest(ev AgentEvent, conn *AgentConnector, targetURL stri
 	for k, v := range headers {
 		if strings.TrimSpace(v) != "" {
 			req.Header.Set(k, v)
+		}
+	}
+	req.Header.Set("X-Mozi-Timestamp", timestamp)
+	if strings.TrimSpace(conn.AgentRef) != "" {
+		req.Header.Set("X-Mozi-Agent-Ref", strings.TrimSpace(conn.AgentRef))
+	}
+	if strings.TrimSpace(conn.AuthType) == "shared_secret" && strings.TrimSpace(conn.MetadataJSON) != "" {
+		var meta map[string]interface{}
+		if json.Unmarshal([]byte(conn.MetadataJSON), &meta) == nil {
+			if plainSecret, ok := meta["shared_secret"].(string); ok && strings.TrimSpace(plainSecret) != "" {
+				req.Header.Set("X-Mozi-Signature", signWebhookPayload(plainSecret, timestamp, body))
+			}
 		}
 	}
 	client := &http.Client{Timeout: 8 * time.Second}
