@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useParams, usePathname, useRouter } from "next/navigation";
-import { LayoutDashboard, SquareKanban, FileText, Settings, Bot, MessageSquare, ChevronDown } from "lucide-react";
+import { LayoutDashboard, SquareKanban, FileText, Settings, Bot, MessageSquare, ActivitySquare } from "lucide-react";
 import { useChatPanel } from "@/providers/chat-panel-provider";
 import { toast } from "sonner";
 
@@ -158,10 +158,23 @@ export function DashboardSidebar({
                                 <SidebarMenuButton
                                     asChild
                                     tooltip="Agents"
+                                    isActive={pathname === `/board/${id}/agents`}
                                 >
                                     <a href={`/board/${id}/agents`}>
                                         <Bot />
                                         <span>Agents</span>
+                                    </a>
+                                </SidebarMenuButton>
+                            </SidebarMenuItem>
+                            <SidebarMenuItem>
+                                <SidebarMenuButton
+                                    asChild
+                                    tooltip="Ops"
+                                    isActive={pathname === `/board/${id}/ops`}
+                                >
+                                    <a href={`/board/${id}/ops`}>
+                                        <ActivitySquare />
+                                        <span>Ops</span>
                                     </a>
                                 </SidebarMenuButton>
                             </SidebarMenuItem>
