@@ -18,12 +18,16 @@ services:
       - REDIS_PASSWORD=moziboard_redis_secret
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - OPENCLAW_CONFIG_PATH=/root/.openclaw/openclaw.json
+      - OPENCLAW_CLI_PATH=/root/.npm-global/bin/openclaw
+      - OPENCLAW_GATEWAY_URL=http://host.docker.internal:18789/v1/chat/completions
+      - OPENCLAW_GATEWAY_TOKEN=a5a3e43e5ef31b7a2fa8e073fbcf562ba35fd25d73599614
     depends_on:
       - db
       - redis
     volumes:
       - ./backend:/app
       - ${HOME}/.openclaw:/root/.openclaw
+      - ${HOME}/.npm-global:/root/.npm-global
       - ${HOME}/.ssh/id_ed25519_moziboard:/root/.ssh/id_rsa:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"

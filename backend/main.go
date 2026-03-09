@@ -12,7 +12,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +31,7 @@ var (
 	openaiClient *openai.Client
 	clients      = make(map[*websocket.Conn]bool)
 	clientsMu    sync.Mutex
+	deliverySemaphore = make(chan struct{}, 4)
 )
 
 type Board struct {
@@ -754,10 +754,9 @@ func processAgentTask(t Task) {
 	agentName := *t.AssigneeID
 	log.Printf("Spawning session for %s to work on task %d...", agentName, t.ID)
 
-	// Mark as doing
 	_, err := db.Exec(context.Background(),
-		"UPDATE tasks SET list_id=$1, updated_by=$2 WHERE id=$3",
-		"doing", agentName, t.ID)
+		"UPDATE tasks SET list_id=$1 WHERE id=$2",
+		"doing", t.ID)
 	if err != nil {
 		log.Printf("Dispatcher failed to mark task %d doing: %v", t.ID, err)
 		return
@@ -766,21 +765,13 @@ func processAgentTask(t Task) {
 	go logActivity(t.ID, agentName, "moved", "Moved to list doing (Auto-dispatched)")
 	go broadcastUpdate("UPDATE")
 
-	taskContent := fmt.Sprintf("MoziBoard Task %d: %s\n%s", t.ID, t.Title, t.Description)
-
-	var cmd *exec.Cmd
-	if agentName == "kodinger" || agentName == "mochi" {
-		cmd = exec.Command("openclaw", "agent", "--profile", agentName, "--agent", agentName, "--message", taskContent)
-	} else {
-		cmd = exec.Command("openclaw", "agent", "--agent", agentName, "--message", taskContent)
-	}
-
-	output, err := cmd.CombinedOutput()
+	message := fmt.Sprintf("MoziBoard task assignment. Task ID: %d\nTitle: %s\nDescription: %s\nPlease acknowledge, work the task, and report progress back through the connected runtime if available.", t.ID, t.Title, t.Description)
+	respBody, err := sendAgentMessageViaGateway(agentName, "", message, fmt.Sprintf("moziboard:auto-dispatch:%s", agentName))
 	if err != nil {
-		log.Printf("OpenClaw error for agent %s on task %d: %v\nOutput: %s", agentName, t.ID, err, string(output))
-	} else {
-		log.Printf("OpenClaw finished for agent %s on task %d.\nOutput: %s", agentName, t.ID, string(output))
+		log.Printf("OpenClaw gateway error for agent %s on task %d: %v", agentName, t.ID, err)
+		return
 	}
+	log.Printf("OpenClaw gateway dispatched for agent %s on task %d. Response: %s", agentName, t.ID, truncateForLog(respBody, 600))
 }
 
 func normalizeTaskStatus(listID string) string {
@@ -822,7 +813,7 @@ func createNotification(taskID *int, targetAgentID string, sourceAgentID *string
 
 func getConnectorForAgent(agentID string) (*AgentConnector, error) {
 	var conn AgentConnector
-	err := db.QueryRow(context.Background(), `SELECT id, agent_id, connector_type, transport_mode, auth_type, endpoint_url, base_url, agent_ref, session_key, status, metadata_json::text, last_success_at, last_error, created_at, updated_at FROM agent_connectors WHERE agent_id=$1 ORDER BY id ASC LIMIT 1`, agentID).
+	err := db.QueryRow(context.Background(), `SELECT id, agent_id, connector_type, transport_mode, auth_type, endpoint_url, base_url, agent_ref, session_key, status, metadata_json::text, last_success_at, last_error, created_at, updated_at FROM agent_connectors WHERE agent_id=$1 ORDER BY updated_at DESC, id DESC LIMIT 1`, agentID).
 		Scan(&conn.ID, &conn.AgentID, &conn.ConnectorType, &conn.TransportMode, &conn.AuthType, &conn.EndpointURL, &conn.BaseURL, &conn.AgentRef, &conn.SessionKey, &conn.Status, &conn.MetadataJSON, &conn.LastSuccessAt, &conn.LastError, &conn.CreatedAt, &conn.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -1264,7 +1255,20 @@ func runtimeTaskReviewRequest(c *fiber.Ctx) error {
 }
 
 func deliverPendingAgentEvents() {
-	rows, err := db.Query(context.Background(), `SELECT id, agent_id, board_id::text, task_id, event_type, payload_json::text, delivery_status, delivery_attempts, last_delivery_at, response_status, response_body, created_at, processed_at FROM agent_events WHERE delivery_status IN ('pending','failed') ORDER BY created_at ASC LIMIT 20`)
+	rows, err := db.Query(context.Background(), `
+		WITH claimed AS (
+			SELECT id
+			FROM agent_events
+			WHERE delivery_status IN ('pending','failed')
+			ORDER BY created_at ASC
+			LIMIT 20
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE agent_events ae
+		SET delivery_status='processing', last_delivery_at=CURRENT_TIMESTAMP
+		FROM claimed
+		WHERE ae.id = claimed.id
+		RETURNING ae.id, ae.agent_id, ae.board_id::text, ae.task_id, ae.event_type, ae.payload_json::text, ae.delivery_status, ae.delivery_attempts, ae.last_delivery_at, ae.response_status, ae.response_body, ae.created_at, ae.processed_at`)
 	if err != nil {
 		log.Printf("event query failed: %v", err)
 		return
@@ -1276,60 +1280,79 @@ func deliverPendingAgentEvents() {
 			log.Printf("event scan failed: %v", err)
 			continue
 		}
-		conn, err := getConnectorForAgent(ev.AgentID)
-		if err != nil || conn == nil {
-			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status='connector_missing', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
-			continue
+
+		select {
+		case deliverySemaphore <- struct{}{}:
+			go func(ev AgentEvent) {
+				defer func() { <-deliverySemaphore }()
+				processAgentEventDelivery(ev)
+			}(ev)
+		default:
+			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='pending', response_status='dispatcher_backpressure', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
 		}
-
-		if conn.ConnectorType == "webhook" {
-			if conn.EndpointURL == "" {
-				_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status='webhook_missing_endpoint', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
-				continue
-			}
-			deliverEventHTTPRequest(ev, conn, conn.EndpointURL, ev.PayloadJSON, map[string]string{"Content-Type": "application/json"}, "webhook")
-			continue
-		}
-
-		if conn.ConnectorType == "clawn_native" {
-			envelopeBytes, _ := json.Marshal(fiber.Map{
-				"event_id": ev.ID,
-				"event_type": ev.EventType,
-				"agent_id": ev.AgentID,
-				"board_id": ev.BoardID,
-				"task_id": ev.TaskID,
-				"transport_mode": conn.TransportMode,
-				"agent_ref": conn.AgentRef,
-				"session_key": conn.SessionKey,
-				"payload": json.RawMessage(ev.PayloadJSON),
-			})
-
-			switch conn.TransportMode {
-			case "internal":
-				responseBody := fmt.Sprintf(`{"strategy":"internal","agent_ref":%q,"session_key":%q}`, conn.AgentRef, conn.SessionKey)
-				_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='routed', delivery_attempts=delivery_attempts+1, response_status='internal_runtime_pending', response_body=$2, processed_at=CURRENT_TIMESTAMP, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, responseBody)
-				continue
-			case "remote_http":
-				if conn.BaseURL == "" {
-					_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status='remote_http_missing_base_url', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
-					continue
-				}
-				targetURL := strings.TrimRight(conn.BaseURL, "/") + "/api/runtime/events"
-				headers := map[string]string{"Content-Type": "application/json", "X-Mozi-Agent-Ref": conn.AgentRef, "X-Mozi-Session-Key": conn.SessionKey}
-				deliverEventHTTPRequest(ev, conn, targetURL, string(envelopeBytes), headers, "clawn_remote_http")
-				continue
-			case "pull":
-				responseBody := fmt.Sprintf(`{"strategy":"pull","agent_ref":%q}`, conn.AgentRef)
-				_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='routed', delivery_attempts=delivery_attempts+1, response_status='pull_runtime_pending', response_body=$2, processed_at=CURRENT_TIMESTAMP, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, responseBody)
-				continue
-			default:
-				_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status=$2, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, "unsupported_transport_mode:"+conn.TransportMode)
-				continue
-			}
-		}
-
-		_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='ignored', response_status=$2, processed_at=CURRENT_TIMESTAMP, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, conn.ConnectorType)
 	}
+}
+
+func processAgentEventDelivery(ev AgentEvent) {
+	conn, err := getConnectorForAgent(ev.AgentID)
+	if err != nil || conn == nil {
+		_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status='connector_missing', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
+		return
+	}
+
+	if conn.ConnectorType == "webhook" {
+		if conn.EndpointURL == "" {
+			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status='webhook_missing_endpoint', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
+			return
+		}
+		deliverEventHTTPRequest(ev, conn, conn.EndpointURL, ev.PayloadJSON, map[string]string{"Content-Type": "application/json"}, "webhook")
+		return
+	}
+
+	if conn.ConnectorType == "clawn_native" {
+		envelopeBytes, _ := json.Marshal(fiber.Map{
+			"event_id": ev.ID,
+			"event_type": ev.EventType,
+			"agent_id": ev.AgentID,
+			"board_id": ev.BoardID,
+			"task_id": ev.TaskID,
+			"transport_mode": conn.TransportMode,
+			"agent_ref": conn.AgentRef,
+			"session_key": conn.SessionKey,
+			"payload": json.RawMessage(ev.PayloadJSON),
+		})
+
+		switch conn.TransportMode {
+		case "internal":
+			if strings.TrimSpace(conn.SessionKey) == "" {
+				_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status='internal_missing_session_key', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
+				return
+			}
+			if err := deliverInternalClawnEvent(ev, conn, string(envelopeBytes)); err != nil {
+				_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status=$2, response_body=$3, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, err.Error(), fmt.Sprintf(`{"strategy":"internal","agent_ref":%q,"session_key":%q}`, conn.AgentRef, conn.SessionKey))
+				return
+			}
+			return
+		case "remote_http":
+			if conn.BaseURL == "" {
+				_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status='remote_http_missing_base_url', last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID)
+				return
+			}
+			targetURL := strings.TrimRight(conn.BaseURL, "/") + "/api/runtime/events"
+			headers := map[string]string{"Content-Type": "application/json", "X-Mozi-Agent-Ref": conn.AgentRef, "X-Mozi-Session-Key": conn.SessionKey}
+			deliverEventHTTPRequest(ev, conn, targetURL, string(envelopeBytes), headers, "clawn_remote_http")
+			return
+		case "pull":
+			responseBody := fmt.Sprintf(`{"strategy":"pull","agent_ref":%q}`, conn.AgentRef)
+			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='routed', delivery_attempts=delivery_attempts+1, response_status='pull_runtime_pending', response_body=$2, processed_at=CURRENT_TIMESTAMP, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, responseBody)
+			return
+		default:
+			_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='failed', delivery_attempts=delivery_attempts+1, response_status=$2, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, "unsupported_transport_mode:"+conn.TransportMode)
+			return
+		}
+	}
+
+	_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='ignored', response_status=$2, processed_at=CURRENT_TIMESTAMP, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, conn.ConnectorType)
 }
 
 func deliverEventHTTPRequest(ev AgentEvent, conn *AgentConnector, targetURL string, body string, headers map[string]string, strategy string) {
@@ -1360,6 +1383,79 @@ func deliverEventHTTPRequest(ev AgentEvent, conn *AgentConnector, targetURL stri
 	responseBody := fmt.Sprintf(`{"strategy":%q,"target_url":%q,"response_body":%q}`, strategy, targetURL, string(bodyBytes))
 	query := fmt.Sprintf(`UPDATE agent_events SET delivery_status=$2, delivery_attempts=delivery_attempts+1, last_delivery_at=CURRENT_TIMESTAMP, response_status=$3, response_body=$4, processed_at=%s WHERE id=$1`, processedAt)
 	_, _ = db.Exec(context.Background(), query, ev.ID, status, resp.Status, responseBody)
+}
+
+func deliverInternalClawnEvent(ev AgentEvent, conn *AgentConnector, envelope string) error {
+	message := buildInternalBridgeMessage(ev, conn, envelope)
+	respBody, err := sendAgentMessageViaGateway(conn.AgentRef, conn.SessionKey, message, conn.SessionKey)
+	if err != nil {
+		return err
+	}
+	_, _ = db.Exec(context.Background(), `UPDATE agent_events SET delivery_status='sent', delivery_attempts=delivery_attempts+1, response_status='internal_runtime_sent', response_body=$2, processed_at=CURRENT_TIMESTAMP, last_delivery_at=CURRENT_TIMESTAMP WHERE id=$1`, ev.ID, fmt.Sprintf(`{"strategy":"internal_gateway","agent_ref":%q,"session_key":%q,"response":%q}`, conn.AgentRef, conn.SessionKey, truncateForLog(respBody, 1200)))
+	return nil
+}
+
+func buildInternalBridgeMessage(ev AgentEvent, conn *AgentConnector, envelope string) string {
+	return fmt.Sprintf("MoziBoard internal bridge event. Connector: clawn_native/internal. AgentRef: %s. SessionKey: %s. Event JSON:\n%s", conn.AgentRef, conn.SessionKey, envelope)
+}
+
+func sendAgentMessageViaGateway(agentID string, sessionKey string, message string, userKey string) (string, error) {
+	gatewayURL := strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_URL"))
+	if gatewayURL == "" {
+		gatewayURL = "http://host.docker.internal:18789/v1/chat/completions"
+	}
+	gatewayToken := strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_TOKEN"))
+	if gatewayToken == "" {
+		return "", fmt.Errorf("gateway_missing_token")
+	}
+	if strings.TrimSpace(agentID) == "" {
+		return "", fmt.Errorf("gateway_missing_agent_id")
+	}
+	payload := map[string]interface{}{
+		"model":    fmt.Sprintf("openclaw:%s", agentID),
+		"messages": []map[string]string{{"role": "user", "content": message}},
+		"stream":   false,
+		"user":     firstNonEmpty(strings.TrimSpace(userKey), fmt.Sprintf("moziboard:%s", agentID)),
+	}
+	body, _ := json.Marshal(payload)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", gatewayURL, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("gateway_request_build_failed: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+gatewayToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-openclaw-agent-id", agentID)
+	if strings.TrimSpace(sessionKey) != "" {
+		req.Header.Set("x-openclaw-session-key", sessionKey)
+	}
+	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("gateway_request_failed: %w", err)
+	}
+	defer resp.Body.Close()
+	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("gateway_http_%d: %s", resp.StatusCode, strings.TrimSpace(string(respBytes)))
+	}
+	return strings.TrimSpace(string(respBytes)), nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func truncateForLog(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
 
 // getAiAgenzProjects proxies a request to the main AiAgenz backend to fetch the user's projects (agents).
