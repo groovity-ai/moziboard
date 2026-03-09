@@ -800,6 +800,30 @@ func normalizeTaskStatus(listID string) string {
 	}
 }
 
+func normalizeRunStatus(taskStatus string) string {
+	switch strings.ToLower(strings.TrimSpace(taskStatus)) {
+	case "todo", "assigned":
+		return "queued"
+	case "in_progress", "doing":
+		return "running"
+	case "review", "qa":
+		return "review"
+	case "blocked":
+		return "blocked"
+	case "done":
+		return "done"
+	default:
+		return "queued"
+	}
+}
+
+func syncTaskAndRunState(taskID int, agentID string, taskStatus string, currentActivity string, blockedReason string, resultSummary string) {
+	listID := statusToListID(taskStatus)
+	runStatus := normalizeRunStatus(taskStatus)
+	_, _ = db.Exec(context.Background(), `UPDATE tasks SET status=$1, list_id=$2, blocked_reason=$3 WHERE id=$4`, taskStatus, listID, blockedReason, taskID)
+	_, _ = db.Exec(context.Background(), `UPDATE agent_runs SET status=$1, current_activity=COALESCE(NULLIF($2,''), current_activity), error_summary=CASE WHEN $1='blocked' THEN $3 ELSE error_summary END, result_summary=CASE WHEN $4<>'' THEN $4 ELSE result_summary END WHERE task_id=$5 AND agent_id=$6 AND status IN ('queued','running','in_progress','blocked','review')`, runStatus, currentActivity, blockedReason, resultSummary, taskID, agentID)
+}
+
 func statusToListID(status string) string {
 	switch strings.ToLower(status) {
 	case "in_progress":
@@ -1193,8 +1217,7 @@ func runtimeTaskAck(c *fiber.Ctx) error {
 	msg := req.Message
 	if msg == "" { msg = "Task accepted, starting work." }
 	_, _ = db.Exec(context.Background(), `INSERT INTO comments (task_id, user_id, content) VALUES ($1,$2,$3)`, req.TaskID, conn.AgentID, msg)
-	_, _ = db.Exec(context.Background(), `UPDATE tasks SET status='in_progress', list_id='doing' WHERE id=$1 AND status IN ('todo','assigned')`, req.TaskID)
-	_, _ = db.Exec(context.Background(), `UPDATE agent_runs SET status='running', current_activity='Working on task' WHERE id=$1`, runID)
+	syncTaskAndRunState(req.TaskID, conn.AgentID, "in_progress", "Working on task", "", "")
 	_, _ = db.Exec(context.Background(), `UPDATE agents SET status='busy', current_task_id=$1, current_run_id=$2, current_activity='Working on task', last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$3`, req.TaskID, runID, conn.AgentID)
 	go logActivity(req.TaskID, conn.AgentID, "acknowledged", msg)
 	go broadcastUpdate("UPDATE")
@@ -1214,7 +1237,7 @@ func runtimeTaskUpdate(c *fiber.Ctx) error {
 	_, err = db.Exec(context.Background(), `UPDATE tasks SET status=$1, list_id=$2, blocked_reason=$3 WHERE id=$4`, req.Status, listID, req.BlockedReason, req.TaskID)
 	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
 	if req.ProgressMessage != "" { _, _ = db.Exec(context.Background(), `INSERT INTO comments (task_id, user_id, content) VALUES ($1,$2,$3)`, req.TaskID, conn.AgentID, req.ProgressMessage) }
-	_, _ = db.Exec(context.Background(), `UPDATE agent_runs SET status=$1, current_activity=$2, error_summary=CASE WHEN $1='blocked' THEN $3 ELSE error_summary END WHERE id=$4`, req.Status, req.CurrentActivity, req.BlockedReason, runID)
+	syncTaskAndRunState(req.TaskID, conn.AgentID, req.Status, req.CurrentActivity, req.BlockedReason, "")
 	agentStatus := "busy"
 	if req.Status == "blocked" { agentStatus = "blocked" }
 	_, _ = db.Exec(context.Background(), `UPDATE agents SET status=$1, current_task_id=$2, current_run_id=$3, current_activity=$4, health_note=$5, last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$6`, agentStatus, req.TaskID, runID, req.CurrentActivity, req.BlockedReason, conn.AgentID)
@@ -1259,8 +1282,7 @@ func runtimeTaskReviewRequest(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil { return c.Status(400).SendString(err.Error()) }
 	if err := ensureAgentBoardAccess(conn.AgentID, req.TaskID); err != nil { return c.Status(403).JSON(fiber.Map{"error": err.Error()}) }
 	runID, _ := ensureActiveRun(req.TaskID, conn.AgentID)
-	_, _ = db.Exec(context.Background(), `UPDATE tasks SET status='review', list_id='qa' WHERE id=$1`, req.TaskID)
-	_, _ = db.Exec(context.Background(), `UPDATE agent_runs SET status='review', result_summary=$1 WHERE id=$2`, req.Summary, runID)
+	syncTaskAndRunState(req.TaskID, conn.AgentID, "review", "Waiting for review", "", req.Summary)
 	_, _ = db.Exec(context.Background(), `UPDATE agents SET status='online', current_activity='Waiting for review', last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$1`, conn.AgentID)
 	if req.Summary != "" { _, _ = db.Exec(context.Background(), `INSERT INTO comments (task_id, user_id, content) VALUES ($1,$2,$3)`, req.TaskID, conn.AgentID, req.Summary) }
 	go logActivity(req.TaskID, conn.AgentID, "review_requested", req.Summary)
@@ -2156,6 +2178,8 @@ func getAgentNotifications(c *fiber.Ctx) error {
 func getAgentEventsOps(c *fiber.Ctx) error {
 	status := strings.TrimSpace(c.Query("status"))
 	agentID := strings.TrimSpace(c.Query("agent_id"))
+	eventType := strings.TrimSpace(c.Query("event_type"))
+	boardID := strings.TrimSpace(c.Query("board_id"))
 	query := `SELECT id, agent_id, board_id::text, task_id, event_type, payload_json::text, delivery_status, delivery_attempts, next_attempt_at, last_delivery_at, response_status, response_body, created_at, processed_at FROM agent_events WHERE 1=1`
 	args := []interface{}{}
 	idx := 1
@@ -2167,6 +2191,16 @@ func getAgentEventsOps(c *fiber.Ctx) error {
 	if agentID != "" {
 		query += fmt.Sprintf(" AND agent_id=$%d", idx)
 		args = append(args, agentID)
+		idx++
+	}
+	if eventType != "" {
+		query += fmt.Sprintf(" AND event_type=$%d", idx)
+		args = append(args, eventType)
+		idx++
+	}
+	if boardID != "" {
+		query += fmt.Sprintf(" AND board_id::text=$%d", idx)
+		args = append(args, boardID)
 		idx++
 	}
 	query += " ORDER BY created_at DESC LIMIT 100"
@@ -2187,11 +2221,31 @@ func getAgentEventsOps(c *fiber.Ctx) error {
 
 func getAgentConnectorsOps(c *fiber.Ctx) error {
 	status := strings.TrimSpace(c.Query("status"))
+	agentID := strings.TrimSpace(c.Query("agent_id"))
+	connectorType := strings.TrimSpace(c.Query("connector_type"))
+	transportMode := strings.TrimSpace(c.Query("transport_mode"))
 	query := `SELECT id, agent_id, connector_type, transport_mode, auth_type, endpoint_url, base_url, agent_ref, session_key, status, metadata_json::text, last_success_at, last_error, created_at, updated_at FROM agent_connectors WHERE 1=1`
 	args := []interface{}{}
+	idx := 1
 	if status != "" {
-		query += " AND status=$1"
+		query += fmt.Sprintf(" AND status=$%d", idx)
 		args = append(args, status)
+		idx++
+	}
+	if agentID != "" {
+		query += fmt.Sprintf(" AND agent_id=$%d", idx)
+		args = append(args, agentID)
+		idx++
+	}
+	if connectorType != "" {
+		query += fmt.Sprintf(" AND connector_type=$%d", idx)
+		args = append(args, connectorType)
+		idx++
+	}
+	if transportMode != "" {
+		query += fmt.Sprintf(" AND transport_mode=$%d", idx)
+		args = append(args, transportMode)
+		idx++
 	}
 	query += " ORDER BY updated_at DESC, id DESC LIMIT 100"
 	rows, err := db.Query(context.Background(), query, args...)
