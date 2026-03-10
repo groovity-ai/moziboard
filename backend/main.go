@@ -256,6 +256,17 @@ type ClawnProjectSource struct {
 	ExistingAgentID  *string  `json:"existing_agent_id,omitempty"`
 }
 
+type ClawnConnectReq struct {
+	BoardID              string `json:"board_id"`
+	ClawnProjectID       string `json:"clawn_project_id"`
+	BoardRole            string `json:"board_role"`
+	AutoAcceptTasks      *bool  `json:"auto_accept_tasks"`
+	CanComment           *bool  `json:"can_comment"`
+	CanUpdateStatus      *bool  `json:"can_update_status"`
+	CanAccessDocs        *bool  `json:"can_access_docs"`
+	CanCreateDeliverables *bool `json:"can_create_deliverables"`
+}
+
 type GeminiEmbeddingResponse struct {
 	Embedding struct {
 		Values []float32 `json:"values"`
@@ -706,6 +717,7 @@ func main() {
 	app.Put("/api/agents/:id/status", updateAgentStatus)
 	app.Get("/api/agents/sync/aiagenz", getAiAgenzProjects)
 	app.Get("/api/integrations/clawn/projects", listClawnProjectsFacade)
+	app.Post("/api/integrations/clawn/connect", connectClawnProjectFacade)
 
 	// Auth Proxies
 	app.Post("/api/auth/login", proxyAuthLogin)
@@ -1745,6 +1757,41 @@ func normalizeClawnProjectSource(item map[string]interface{}) ClawnProjectSource
 	}
 }
 
+func getExistingClawnProjectConnections(boardID string) map[string]string {
+	existingByProjectID := map[string]string{}
+	if strings.TrimSpace(boardID) == "" {
+		return existingByProjectID
+	}
+	rows, err := db.Query(context.Background(), `
+		SELECT ba.agent_id, ac.metadata_json::text
+		FROM board_agents ba
+		JOIN agent_connectors ac ON ac.agent_id = ba.agent_id
+		WHERE ba.board_id = $1
+		  AND ac.connector_type = 'clawn_native'`, boardID)
+	if err != nil {
+		return existingByProjectID
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var agentID, metaText string
+		if err := rows.Scan(&agentID, &metaText); err != nil {
+			continue
+		}
+		if strings.TrimSpace(metaText) == "" {
+			continue
+		}
+		var meta map[string]interface{}
+		if json.Unmarshal([]byte(metaText), &meta) != nil {
+			continue
+		}
+		projectID := interfaceToString(meta["clawn_project_id"])
+		if projectID != "" {
+			existingByProjectID[projectID] = agentID
+		}
+	}
+	return existingByProjectID
+}
+
 func listClawnProjectsFacade(c *fiber.Ctx) error {
 	boardID := strings.TrimSpace(c.Query("board_id"))
 	rawProjects, statusCode, err := fetchAiAgenzProjects(c)
@@ -1752,36 +1799,7 @@ func listClawnProjectsFacade(c *fiber.Ctx) error {
 		return c.Status(statusCode).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	existingByProjectID := map[string]string{}
-	if boardID != "" {
-		rows, err := db.Query(context.Background(), `
-			SELECT ba.agent_id, ac.metadata_json::text
-			FROM board_agents ba
-			JOIN agent_connectors ac ON ac.agent_id = ba.agent_id
-			WHERE ba.board_id = $1
-			  AND ac.connector_type = 'clawn_native'`, boardID)
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var agentID, metaText string
-				if err := rows.Scan(&agentID, &metaText); err != nil {
-					continue
-				}
-				if strings.TrimSpace(metaText) == "" {
-					continue
-				}
-				var meta map[string]interface{}
-				if json.Unmarshal([]byte(metaText), &meta) != nil {
-					continue
-				}
-				projectID := interfaceToString(meta["clawn_project_id"])
-				if projectID != "" {
-					existingByProjectID[projectID] = agentID
-				}
-			}
-		}
-	}
-
+	existingByProjectID := getExistingClawnProjectConnections(boardID)
 	items := make([]ClawnProjectSource, 0, len(rawProjects))
 	for _, raw := range rawProjects {
 		item := normalizeClawnProjectSource(raw)
@@ -1792,6 +1810,101 @@ func listClawnProjectsFacade(c *fiber.Ctx) error {
 		items = append(items, item)
 	}
 	return c.JSON(items)
+}
+
+func connectClawnProjectFacade(c *fiber.Ctx) error {
+	var req ClawnConnectReq
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	if strings.TrimSpace(req.BoardID) == "" || strings.TrimSpace(req.ClawnProjectID) == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "board_id and clawn_project_id are required"})
+	}
+
+	rawProjects, statusCode, err := fetchAiAgenzProjects(c)
+	if err != nil {
+		return c.Status(statusCode).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	var selected *ClawnProjectSource
+	for _, raw := range rawProjects {
+		item := normalizeClawnProjectSource(raw)
+		if item.ProjectID == req.ClawnProjectID {
+			selected = &item
+			break
+		}
+	}
+	if selected == nil {
+		return c.Status(404).JSON(fiber.Map{"error": "clawn_project_not_found"})
+	}
+	if !selected.IsConnectable {
+		return c.Status(409).JSON(fiber.Map{"error": "clawn_project_not_connectable", "reason": selected.ConnectReason})
+	}
+
+	agentID := fmt.Sprintf("clawn-project:%s", selected.ProjectID)
+	displayName := firstNonEmpty(selected.DisplayName, selected.ProjectID)
+	avatar := "🦊"
+	roleName := "Clawn Runtime"
+	description := fmt.Sprintf("Connected from Clawn project %s (%s)", selected.DisplayName, selected.Engine)
+	boardRole := firstNonEmpty(strings.TrimSpace(req.BoardRole), "worker")
+	autoAccept := true
+	if req.AutoAcceptTasks != nil {
+		autoAccept = *req.AutoAcceptTasks
+	}
+	canComment := req.CanComment == nil || *req.CanComment
+	canUpdate := req.CanUpdateStatus == nil || *req.CanUpdateStatus
+	canDocs := req.CanAccessDocs == nil || *req.CanAccessDocs
+	canDeliver := req.CanCreateDeliverables == nil || *req.CanCreateDeliverables
+
+	_, err = db.Exec(context.Background(), `INSERT INTO members (id, name, role, avatar) VALUES ($1,$2,'agent',$3) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, role='agent', avatar=EXCLUDED.avatar`, agentID, displayName, avatar)
+	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
+	_, err = db.Exec(context.Background(), `INSERT INTO agents (id, display_name, role_name, avatar, provider, engine, description, is_native_clawn, soul, memory, rules, cron_schedule, active, status) VALUES ($1,$2,$3,$4,$5,$6,$7,true,'','', '', '*/10 * * * *', true, $8) ON CONFLICT (id) DO UPDATE SET display_name=EXCLUDED.display_name, role_name=EXCLUDED.role_name, avatar=EXCLUDED.avatar, provider=EXCLUDED.provider, engine=EXCLUDED.engine, description=EXCLUDED.description, is_native_clawn=true, status=EXCLUDED.status, updated_at=CURRENT_TIMESTAMP`, agentID, displayName, roleName, avatar, "clawn", selected.Engine, description, selected.Status)
+	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
+
+	meta := map[string]interface{}{
+		"source": "clawn",
+		"clawn_project_id": selected.ProjectID,
+		"owner_user_id": selected.OwnerUserID,
+		"engine": selected.Engine,
+		"plan": selected.Plan,
+		"status": selected.Status,
+		"container_id": selected.ContainerID,
+		"container_name": selected.ContainerName,
+		"capabilities": selected.Capabilities,
+		"linkage_mode": "project-centric",
+	}
+	metaBytes, _ := json.Marshal(meta)
+	plainToken, tokenHash, err := generateMachineToken()
+	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
+	var connectorID int
+	err = db.QueryRow(context.Background(), `
+		INSERT INTO agent_connectors (agent_id, connector_type, transport_mode, auth_type, machine_token_hash, endpoint_url, base_url, agent_ref, session_key, shared_secret_hash, status, metadata_json)
+		VALUES ($1,'clawn_native','internal','machine_token',$2,'','','','', '', 'connected', $3::jsonb)
+		ON CONFLICT DO NOTHING
+		RETURNING id`, agentID, tokenHash, string(metaBytes)).Scan(&connectorID)
+	if err != nil {
+		_ = db.QueryRow(context.Background(), `UPDATE agent_connectors SET metadata_json=$2::jsonb, status='connected', updated_at=CURRENT_TIMESTAMP WHERE agent_id=$1 AND connector_type='clawn_native' RETURNING id`, agentID, string(metaBytes)).Scan(&connectorID)
+	}
+
+	capMap := map[string]interface{}{
+		"can_comment": canComment,
+		"can_update_status": canUpdate,
+		"can_access_docs": canDocs,
+		"can_create_deliverables": canDeliver,
+	}
+	capBytes, _ := json.Marshal(capMap)
+	var boardAgentID int
+	err = db.QueryRow(context.Background(), `INSERT INTO board_agents (board_id, agent_id, board_role, active, auto_accept_tasks, can_comment, can_update_status, can_access_docs, can_create_deliverables, capabilities_json) VALUES ($1,$2,$3,true,$4,$5,$6,$7,$8,$9::jsonb) ON CONFLICT (board_id, agent_id) DO UPDATE SET board_role=EXCLUDED.board_role, active=true, auto_accept_tasks=EXCLUDED.auto_accept_tasks, can_comment=EXCLUDED.can_comment, can_update_status=EXCLUDED.can_update_status, can_access_docs=EXCLUDED.can_access_docs, can_create_deliverables=EXCLUDED.can_create_deliverables, capabilities_json=EXCLUDED.capabilities_json, updated_at=CURRENT_TIMESTAMP RETURNING id`, req.BoardID, agentID, boardRole, autoAccept, canComment, canUpdate, canDocs, canDeliver, string(capBytes)).Scan(&boardAgentID)
+	if err != nil { return c.Status(500).JSON(fiber.Map{"error": err.Error()}) }
+	_, _ = db.Exec(context.Background(), `INSERT INTO board_members (board_id, member_id, role) VALUES ($1,$2,'agent') ON CONFLICT DO NOTHING`, req.BoardID, agentID)
+
+	return c.JSON(fiber.Map{
+		"ok": true,
+		"agent": fiber.Map{"id": agentID, "display_name": displayName},
+		"connector": fiber.Map{"id": connectorID, "connector_type": "clawn_native", "transport_mode": "internal", "status": "connected"},
+		"board_agent": fiber.Map{"id": boardAgentID, "board_id": req.BoardID, "agent_id": agentID},
+		"machine_token": plainToken,
+	})
 }
 
 // getAiAgenzProjects proxies a request to the main AiAgenz backend to fetch the user's projects (agents).
