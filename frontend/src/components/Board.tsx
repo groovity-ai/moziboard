@@ -27,6 +27,8 @@ export type Task = {
   list_id: string;
   position: number;
   assignee_id?: string;
+  status?: string;
+  blocked_reason?: string;
 };
 
 export type ListType = {
