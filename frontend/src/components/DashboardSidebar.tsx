@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useParams, usePathname, useRouter } from "next/navigation";
+import { useParams, usePathname } from "next/navigation";
 import { LayoutDashboard, SquareKanban, FileText, Settings, Bot, MessageSquare, ActivitySquare } from "lucide-react";
 import { useChatPanel } from "@/providers/chat-panel-provider";
 import { toast } from "sonner";
@@ -21,6 +21,29 @@ import {
     SidebarGroupContent,
 } from "@/components/ui/sidebar";
 
+type BoardAgentEntry = {
+    id: number;
+    board_id: string;
+    agent_id: string;
+    active: boolean;
+    agent?: {
+        id: string;
+        display_name?: string;
+        is_native_clawn?: boolean;
+        provider?: string;
+        engine?: string;
+        status?: string;
+        avatar?: string;
+    };
+};
+
+type ClawnProject = {
+    project_id: string;
+    display_name: string;
+    status?: string;
+    already_connected?: boolean;
+};
+
 export function DashboardSidebar({
     ...props
 }: React.ComponentProps<typeof Sidebar>) {
@@ -29,29 +52,48 @@ export function DashboardSidebar({
     const pathname = usePathname();
     const { toggle, isOpen, activeAgentId, setActiveAgentId, open: openChat } = useChatPanel();
 
-    const [agents, setAgents] = React.useState<any[]>([]);
+    const [connectedAgents, setConnectedAgents] = React.useState<BoardAgentEntry[]>([]);
+    const [availableCount, setAvailableCount] = React.useState(0);
     const [isLoading, setIsLoading] = React.useState(true);
 
     React.useEffect(() => {
-        const fetchAgents = async () => {
+        const run = async () => {
             try {
-                const res = await fetch('/api/agents/sync/aiagenz', {
-                    headers: buildAuthHeaders(),
-                    credentials: 'include',
-                });
-                if (res.ok) {
-                    const data = await res.json();
-                    setAgents(Array.isArray(data) ? data : data.data || []);
+                setIsLoading(true);
+                const [boardAgentsRes, clawnProjectsRes] = await Promise.all([
+                    fetch(`/api/boards/${id}/agents`),
+                    fetch(`/api/integrations/clawn/projects?board_id=${id}`, {
+                        headers: buildAuthHeaders(),
+                        credentials: 'include',
+                    }),
+                ]);
+
+                if (boardAgentsRes.ok) {
+                    const boardAgentsData = await boardAgentsRes.json();
+                    const normalized = Array.isArray(boardAgentsData) ? boardAgentsData : [];
+                    setConnectedAgents(normalized.filter((entry) => entry?.active !== false && entry?.agent));
+                } else {
+                    setConnectedAgents([]);
+                }
+
+                if (clawnProjectsRes.ok) {
+                    const clawnProjectsData = await clawnProjectsRes.json();
+                    const projects: ClawnProject[] = Array.isArray(clawnProjectsData) ? clawnProjectsData : [];
+                    setAvailableCount(projects.filter((item) => !item.already_connected).length);
+                } else {
+                    setAvailableCount(0);
                 }
             } catch (error) {
-                console.error("Failed to fetch AiAgenz agents", error);
+                console.error("Failed to fetch board workforce state", error);
+                setConnectedAgents([]);
+                setAvailableCount(0);
             } finally {
                 setIsLoading(false);
             }
         };
 
-        fetchAgents();
-    }, []);
+        run();
+    }, [id]);
 
     return (
         <Sidebar collapsible="icon" variant="inset" {...props}>
@@ -106,49 +148,72 @@ export function DashboardSidebar({
                 </SidebarGroup>
 
                 <SidebarGroup>
-                    <SidebarGroupLabel>AiAgenz Workforce</SidebarGroupLabel>
+                    <SidebarGroupLabel>
+                        <div className="flex w-full items-center justify-between gap-2">
+                            <span>Connected Workforce</span>
+                            {!isLoading && availableCount > 0 && (
+                                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
+                                    +{availableCount} available
+                                </span>
+                            )}
+                        </div>
+                    </SidebarGroupLabel>
                     <SidebarGroupContent>
                         <SidebarMenu>
                             {isLoading ? (
                                 <SidebarMenuItem>
                                     <SidebarMenuButton disabled>
                                         <Bot className="animate-bounce" />
-                                        <span>Syncing agents...</span>
+                                        <span>Loading workforce...</span>
                                     </SidebarMenuButton>
                                 </SidebarMenuItem>
-                            ) : agents.length === 0 ? (
+                            ) : connectedAgents.length === 0 ? (
                                 <SidebarMenuItem>
                                     <SidebarMenuButton disabled>
                                         <Bot className="opacity-50" />
-                                        <span className="opacity-50">No agents found</span>
+                                        <span className="opacity-50">No connected agents</span>
                                     </SidebarMenuButton>
                                 </SidebarMenuItem>
                             ) : (
-                                agents.map((agent) => (
-                                    <SidebarMenuItem key={agent.id}>
-                                        <SidebarMenuButton
-                                            tooltip={`Chat with ${agent.name}`}
-                                            isActive={isOpen && activeAgentId === agent.id}
-                                            onClick={(e) => {
-                                                e.preventDefault();
-                                                setActiveAgentId(agent.id);
-                                                openChat();
-                                                toast.success(`Connected to ${agent.name}`);
-                                            }}
-                                            className={activeAgentId === agent.id ? "text-primary" : ""}
-                                        >
-                                            <div className="flex items-center gap-2 w-full">
-                                                <div className="relative">
-                                                    <img src={`https://api.dicebear.com/7.x/bottts/svg?seed=${agent.id}`} alt="Bot avatar" className="w-5 h-5 rounded bg-muted" />
-                                                    {agent.status === "running" && (
-                                                        <span className="absolute -bottom-0.5 -right-0.5 w-1.5 h-1.5 bg-green-500 rounded-full"></span>
-                                                    )}
+                                connectedAgents.map((entry) => {
+                                    const agent = entry.agent;
+                                    if (!agent) return null;
+                                    return (
+                                        <SidebarMenuItem key={agent.id}>
+                                            <SidebarMenuButton
+                                                tooltip={`Chat with ${agent.display_name || agent.id}`}
+                                                isActive={isOpen && activeAgentId === agent.id}
+                                                onClick={(e) => {
+                                                    e.preventDefault();
+                                                    setActiveAgentId(agent.id);
+                                                    openChat();
+                                                    toast.success(`Connected to ${agent.display_name || agent.id}`);
+                                                }}
+                                                className={activeAgentId === agent.id ? "text-primary" : ""}
+                                            >
+                                                <div className="flex items-center gap-2 w-full">
+                                                    <div className="relative">
+                                                        <img src={`https://api.dicebear.com/7.x/bottts/svg?seed=${agent.id}`} alt="Bot avatar" className="w-5 h-5 rounded bg-muted" />
+                                                        {(agent.status || '').toLowerCase() === "online" && (
+                                                            <span className="absolute -bottom-0.5 -right-0.5 w-1.5 h-1.5 bg-green-500 rounded-full"></span>
+                                                        )}
+                                                    </div>
+                                                    <span className="truncate flex-1">{agent.display_name || agent.id}</span>
                                                 </div>
-                                                <span className="truncate flex-1">{agent.name}</span>
-                                            </div>
-                                        </SidebarMenuButton>
-                                    </SidebarMenuItem>
-                                ))
+                                            </SidebarMenuButton>
+                                        </SidebarMenuItem>
+                                    );
+                                })
+                            )}
+                            {!isLoading && availableCount > 0 && (
+                                <SidebarMenuItem>
+                                    <SidebarMenuButton asChild tooltip="Open Agents page to connect more from Clawn">
+                                        <a href={`/board/${id}/agents`}>
+                                            <Bot />
+                                            <span>Connect more from Clawn</span>
+                                        </a>
+                                    </SidebarMenuButton>
+                                </SidebarMenuItem>
                             )}
                         </SidebarMenu>
                     </SidebarGroupContent>
