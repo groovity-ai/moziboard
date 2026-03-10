@@ -2,34 +2,49 @@
 
 Last updated: 2026-03-10
 
-This document defines the product and technical blueprint for a one-click **"Connect from Clawn"** flow inside MoziBoard.
+This document defines the **schema-verified** product and technical blueprint for a one-click **"Connect from Clawn"** flow inside MoziBoard.
 
-The goal is to replace manual connector configuration with a guided picker that lets a user:
+This revision is based on an audit of the current Clawn backend and database.
 
-1. browse Clawn agents they own
-2. select one or more agents that are runtime-ready
-3. connect them to a MoziBoard board
-4. let MoziBoard automatically create the required agent, connector, and board membership records
+## Audit-verified reality
+Clawn currently appears to be:
+- **project-centric**, not agent-registry-centric
+- ownership-scoped through `projects.user_id`
+- runtime-aware at the **project/container** level
+- capable of exposing project status, engine, capabilities, config, and basic agent status
+
+Clawn does **not yet** expose a formal stable agent registry contract with guaranteed fields such as:
+- `clawn_agent_id`
+- `agent_ref`
+- `session_key`
+- durable runtime linkage records suitable for third-party orchestration
+
+Because of that, this blueprint treats the source object as:
+
+> **Clawn Project / Runtime**
+
+not as a fully normalized multi-agent registry.
+
+The UX may still say **"Connect Agent from Clawn"** for simplicity, but the backend contract for Phase 1 should be based on **projects**.
 
 ---
 
 # 1. Problem Statement
 
-Today, connecting a Clawn-backed agent to MoziBoard requires internal knowledge such as:
-- `agent_ref`
-- `session_key`
+Today, connecting a Clawn-backed runtime to MoziBoard requires internal knowledge such as:
 - connector type
 - transport mode
 - machine token lifecycle
 - runtime auth expectations
+- whether runtime session linkage is stable or only convention-based
 
-That is acceptable for development, but it is not acceptable as the long-term product UX.
+That is acceptable for development, but not for real product UX.
 
-From the user's perspective, the intent is simple:
+From the user's point of view, the intent is simple:
 
-> "Show me the agents I already have in Clawn, and let me attach one to this board."
+> "Show me my Clawn runtime projects and let me connect one to this board."
 
-The user should not be required to understand transport-level configuration.
+The user should not be required to understand transport internals.
 
 ---
 
@@ -40,24 +55,61 @@ Turn manual runtime registration into a **source picker flow**.
 Inside MoziBoard, the user should be able to:
 - open **Register Agent**
 - choose **Clawn** as the source
-- see only Clawn agents/projects they are allowed to use
-- select one agent
+- see only Clawn projects/runtimes they are allowed to use
+- select one item
 - choose board permissions
 - click **Connect**
 
 MoziBoard should then automatically:
-- resolve the selected Clawn agent's runtime metadata
+- resolve the selected Clawn project's runtime metadata
 - create or update the MoziBoard `agents` record
 - create or update the `agent_connectors` record
 - attach the agent to the board through `board_agents`
-- generate and store runtime auth material as needed
+- generate/store runtime auth material where required
 
 ---
 
-# 3. UX Vision
+# 3. Why the Source Object Must Be "Project" for Phase 1
 
-## 3.1 Entry Point
+## 3.1 What the Clawn audit confirmed
+The following are real, verified Clawn concepts today:
+- `projects`
+- `users`
+- `projects.user_id` ownership
+- `projects.engine`
+- `projects.status`
+- `projects.container_id`
+- `projects.container_name`
+- project-level `config`
+- project-level capabilities
+- `GET /api/projects`
+- `GET /api/projects/:id`
+- `GET /api/projects/:id/agent-status`
+- `GET /api/projects/:id/sessions`
+- `GET /api/projects/:id/config`
 
+## 3.2 What the audit did not confirm as a stable integration contract
+The following should **not** be assumed as first-class Clawn backend contracts yet:
+- separate `agents` table for user-owned runtime agents
+- stable `clawn_agent_id` record independent of project
+- persisted `agent_ref` field exposed as integration-safe metadata
+- persisted `session_key` field exposed as integration-safe metadata
+- runtime connector records suitable for direct MoziBoard ingestion
+
+## 3.3 Implication
+Phase 1 must treat:
+- **one Clawn project**
+
+as:
+- **one connectable runtime-backed agent source**
+
+This is slightly less ideal than a true agent registry, but it is much safer and aligns with the real system today.
+
+---
+
+# 4. UX Vision
+
+## 4.1 Entry Point
 Primary entry point:
 - `Board > Agents > Register Agent`
 
@@ -67,31 +119,42 @@ Within the Register Agent flow, the user sees source options:
 - Future sources (OpenClaw direct, webhook, remote runtime, etc.)
 
 For this blueprint, the focus is:
-- **Clawn → Agent Picker → Connect**
+- **Clawn → Project/Runtime Picker → Connect**
+
+The UI label may still say:
+- `Connect Agent from Clawn`
+
+because that is the user-friendly mental model.
 
 ---
 
-## 3.2 User Journey
+## 4.2 User Journey
 
 ### Step 1 — Open picker
 User clicks:
 - `Connect Agent`
 - then chooses `From Clawn`
 
-### Step 2 — Browse eligible Clawn agents
-MoziBoard shows a list of Clawn agents available to the current user.
+### Step 2 — Browse eligible Clawn runtimes
+MoziBoard shows a list of **Clawn projects** available to the current user.
 
 Each item should show:
-- agent name
 - project name
-- model
-- runtime type
-- readiness status
-- last seen / runtime health
-- already connected badge if the board already has it
+- engine (`openclaw`, `picoclaw`, etc.)
+- status
+- plan
+- capabilities
+- basic readiness status
+- already connected badge if this board already has it
 
-### Step 3 — Select agent
-User selects one agent.
+Optional enriched fields if available:
+- display name for main runtime agent
+- model
+- last seen / last heartbeat
+- health summary
+
+### Step 3 — Select one runtime source
+User selects one item.
 
 ### Step 4 — Configure board role
 User configures board-level behavior only, not runtime internals:
@@ -106,26 +169,27 @@ User configures board-level behavior only, not runtime internals:
 User clicks `Connect`.
 
 ### Step 6 — System performs automation
-MoziBoard performs all backend orchestration:
+MoziBoard performs backend orchestration:
 - validate ownership/access
-- fetch runtime metadata from Clawn
+- fetch project detail from Clawn
+- resolve runtime metadata as far as Clawn currently supports
 - upsert internal agent record
 - upsert connector config
 - create board membership
 - return success state
 
-### Step 7 — Board reflects connected agent
+### Step 7 — Board reflects connected runtime-backed agent
 User is returned to the board agent list and can immediately:
 - assign work
-- see agent in board membership
-- inspect connector in Ops Dashboard
+- see the attached agent in board membership
+- inspect connector health in Ops Dashboard
 
 ---
 
-# 4. Core Principle: User Picks Intent, System Builds Runtime Config
+# 5. Core Principle: User Picks Intent, System Builds Runtime Config
 
 The user should choose:
-- **which agent**
+- **which Clawn runtime/project**
 - **which board**
 - **what permissions**
 
@@ -133,35 +197,35 @@ The system should decide:
 - connector type
 - transport mode
 - auth mode
-- agent reference mapping
-- runtime session linkage
-- token generation and storage
+- internal mapping to MoziBoard agent identity
+- token generation/storage
+- whether enough runtime linkage exists to enable dispatch immediately
 
 This is the core product rule for the Clawn native path.
 
 ---
 
-# 5. Data Sources and Integration Boundary
+# 6. Data Sources and Integration Boundary
 
-There are two ways for MoziBoard to discover Clawn agents.
+There are two ways for MoziBoard to discover Clawn runtime sources.
 
 ## Option A — Direct internal adapter (recommended for Phase 1)
 MoziBoard reads Clawn-owned data through a trusted internal adapter.
 
 This adapter may use:
 - direct database reads
-- direct internal API calls
-- service-to-service authenticated fetches
+- internal authenticated API calls
+- service-to-service fetches
 
-Use this when both systems are controlled by the same ecosystem and speed matters.
+Use this when both systems are controlled by the same ecosystem and shipping speed matters.
 
 ### Pros
-- faster to ship
-- minimal frontend complexity
-- enough for internal ecosystem rollout
+- fastest to ship
+- enough for internal rollout
+- works with current project-centric Clawn model
 
 ### Cons
-- tighter coupling to Clawn schema/runtime model
+- tighter coupling to current Clawn schema
 - schema drift risk if Clawn changes aggressively
 
 ---
@@ -170,126 +234,140 @@ Use this when both systems are controlled by the same ecosystem and speed matter
 MoziBoard fetches data from an explicit Clawn integration API.
 
 Example responsibilities on Clawn side:
-- list eligible agents for current user
-- return runtime metadata for selected agent
-- expose connection readiness state
-- optionally return signed connection payloads
+- list connectable projects for current user
+- expose runtime-readiness state
+- expose MoziBoard-safe runtime metadata
+- later expose richer agent registry data when Clawn evolves
 
 ### Pros
 - cleaner boundary
 - easier long-term maintenance
-- better security and ownership enforcement
+- stronger security contract
 
 ### Cons
-- requires more integration work upfront
+- requires more work upfront
 
 ---
 
-# 6. Ownership and Access Model
+# 7. Ownership and Access Model
 
-This flow is only safe if MoziBoard can determine which Clawn agents belong to the current user.
+This flow is only safe if MoziBoard can determine which Clawn projects belong to the current user.
 
 ## Required rule
-MoziBoard must only list agents that the authenticated MoziBoard user is allowed to connect.
+MoziBoard must only list Clawn projects/runtimes that the authenticated MoziBoard user is allowed to connect.
 
 That means we need a trust mapping between:
 - MoziBoard user identity
 - Clawn user identity
 
 ## Minimum acceptable access rule
-An agent can appear in the picker only if:
+A runtime source can appear in the picker only if:
 - the current MoziBoard user owns the Clawn project, or
-- the current MoziBoard user has explicit permission in Clawn, or
+- the current user has explicit permission in Clawn, or
 - the current user is an admin with cross-project visibility
 
-## Never do this
-Do not let the frontend pass raw runtime metadata and assume it is trustworthy.
+## Audit-backed ownership note
+The current Clawn DB supports ownership through:
+- `projects.user_id`
 
-The selected `clawn_agent_id` should be treated as a lookup key only.
-MoziBoard must resolve sensitive/runtime fields server-side.
+This is the most reliable Phase 1 basis for filtering picker results.
+
+## Never do this
+Do not let the frontend pass runtime internals and assume they are trustworthy.
+
+The selected `clawn_project_id` should be treated as a lookup key only.
+MoziBoard must resolve all sensitive/runtime fields server-side.
 
 ---
 
-# 7. Required Clawn Metadata
+# 8. Required Clawn Metadata
 
-For each connectable Clawn agent, MoziBoard ultimately needs enough information to build a valid native connector.
+For each connectable Clawn runtime source, MoziBoard needs enough data to:
+- render the picker
+- decide whether connection is possible
+- create a valid MoziBoard agent + connector mapping
 
-## 7.1 Picker list payload
-This is what the UI needs to render the picker.
+## 8.1 Picker list payload
+This is what the UI should use.
 
 ```json
 {
-  "id": "clawn-agent-123",
-  "display_name": "Kodinger 5.4",
-  "project_id": "proj_abc",
-  "project_name": "Groovity Core",
-  "owner_user_id": "user_1",
-  "runtime_type": "openclaw",
-  "model": "openai-codex/gpt-5.4",
-  "status": "online",
-  "last_seen_at": "2026-03-10T02:40:00Z",
+  "project_id": "ec24c0f8-d99d-4c9e-b361-0e94d4698322",
+  "display_name": "aa",
+  "owner_user_id": "13cd5bad-cabf-4c81-9172-e24f32edf7c7",
+  "engine": "openclaw",
+  "plan": "starter",
+  "status": "exited",
+  "container_id": "9b6045d6dfa272cb8892e8547abfbaa5e91157af0ec0dcdf8bb8e4902ce69fd5",
+  "container_name": "aiagenz-ec24c0f8-d99d-4c9e-b361-0e94d4698322",
+  "capabilities": ["sessions", "memory", "skills"],
   "is_connectable": true,
-  "connect_reason": "runtime_ready",
+  "connect_reason": "project_runtime_available",
   "already_connected": false
 }
 ```
 
-## 7.2 Runtime resolution payload
-This is what the backend needs to actually create the connector.
+## 8.2 Runtime resolution payload
+This is what the backend should resolve before connector creation.
 
 ```json
 {
-  "id": "clawn-agent-123",
-  "display_name": "Kodinger 5.4",
+  "project_id": "ec24c0f8-d99d-4c9e-b361-0e94d4698322",
+  "display_name": "aa",
   "provider": "clawn",
   "engine": "openclaw",
   "runtime": {
     "connector_type": "clawn_native",
     "transport_mode": "internal",
-    "agent_ref": "serve-codex54",
-    "session_key": "sess_123",
-    "base_url": "",
-    "auth_mode": "machine_token"
+    "project_token": "ec24c0f8-d99d-4c9e-b361-0e94d4698322",
+    "main_agent_id": "main",
+    "status": "stopped",
+    "session_strategy": "convention_based_or_unresolved"
   },
   "capabilities": {
-    "can_comment": true,
-    "can_update_status": true,
-    "can_access_docs": true,
-    "can_create_deliverables": true
+    "sessions": true,
+    "memory": true,
+    "skills": true
   }
 }
 ```
 
-## Notes
-- `agent_ref` and `session_key` must never be typed by the end user in this flow
-- `is_connectable=false` should hide the connect action or disable it with a reason
-- `runtime_type` may later support `openclaw`, `picoclaw`, `remote_http`, or `pull`
+## Important note
+This runtime payload intentionally avoids pretending that `agent_ref` and `session_key` are already stable Clawn contracts.
+
+Those fields may exist later through:
+- a dedicated Clawn integration endpoint
+- a MoziBoard-safe runtime metadata contract
+- a formal runtime registry layer
+
+Until then, they should be treated as:
+- unresolved
+- convention-based
+- or optional integration enrichments
 
 ---
 
-# 8. Proposed MoziBoard Backend API
+# 9. Proposed MoziBoard Backend API
 
 To keep the frontend simple, MoziBoard should expose a Clawn integration facade.
 
-## 8.1 List eligible Clawn agents
-### `GET /api/integrations/clawn/agents?board_id=:id`
+## 9.1 List eligible Clawn projects/runtimes
+### `GET /api/integrations/clawn/projects?board_id=:id`
 
-Returns Clawn agents available to the current user and enriched with connection state.
+Returns connectable Clawn projects available to the current user and enriched with connection state.
 
 ### Response example
 ```json
 [
   {
-    "id": "clawn-agent-123",
-    "display_name": "Kodinger 5.4",
-    "project_id": "proj_abc",
-    "project_name": "Groovity Core",
-    "runtime_type": "openclaw",
-    "model": "openai-codex/gpt-5.4",
-    "status": "online",
-    "last_seen_at": "2026-03-10T02:40:00Z",
+    "project_id": "ec24c0f8-d99d-4c9e-b361-0e94d4698322",
+    "display_name": "aa",
+    "engine": "openclaw",
+    "plan": "starter",
+    "status": "exited",
+    "capabilities": ["sessions", "memory", "skills"],
     "is_connectable": true,
-    "connect_reason": "runtime_ready",
+    "connect_reason": "project_runtime_available",
     "already_connected": false,
     "existing_agent_id": null
   }
@@ -299,20 +377,20 @@ Returns Clawn agents available to the current user and enriched with connection 
 ### Server responsibilities
 - authenticate MoziBoard user
 - resolve corresponding Clawn identity
-- fetch Clawn projects/agents owned by that user
-- filter to agents that are runtime-ready
+- fetch Clawn projects owned by that user
+- filter to projects that are connectable for the current integration phase
 - annotate if already connected to current board
 
 ---
 
-## 8.2 Connect selected Clawn agent
+## 9.2 Connect selected Clawn runtime/project
 ### `POST /api/integrations/clawn/connect`
 
 ### Request body
 ```json
 {
   "board_id": "5dd8c641-f7af-46b1-91bd-ada0d6384fa0",
-  "clawn_agent_id": "clawn-agent-123",
+  "clawn_project_id": "ec24c0f8-d99d-4c9e-b361-0e94d4698322",
   "board_role": "executor",
   "auto_accept_tasks": true,
   "can_comment": true,
@@ -327,8 +405,8 @@ Returns Clawn agents available to the current user and enriched with connection 
 {
   "ok": true,
   "agent": {
-    "id": "clawn:clawn-agent-123",
-    "display_name": "Kodinger 5.4"
+    "id": "clawn-project:ec24c0f8-d99d-4c9e-b361-0e94d4698322",
+    "display_name": "aa"
   },
   "connector": {
     "id": 42,
@@ -339,14 +417,14 @@ Returns Clawn agents available to the current user and enriched with connection 
   "board_agent": {
     "id": 77,
     "board_id": "5dd8c641-f7af-46b1-91bd-ada0d6384fa0",
-    "agent_id": "clawn:clawn-agent-123"
+    "agent_id": "clawn-project:ec24c0f8-d99d-4c9e-b361-0e94d4698322"
   }
 }
 ```
 
 ---
 
-# 9. Proposed Server-Side Connect Algorithm
+# 10. Proposed Server-Side Connect Algorithm
 
 When `POST /api/integrations/clawn/connect` is called, MoziBoard should do the following:
 
@@ -359,114 +437,163 @@ Map the MoziBoard user to the Clawn user/account context.
 ## Step 3 — Validate board access
 Ensure the user is allowed to modify the target board.
 
-## Step 4 — Fetch selected agent from Clawn
-Resolve the selected `clawn_agent_id` from trusted Clawn data.
+## Step 4 — Fetch selected project from Clawn
+Resolve the selected `clawn_project_id` from trusted Clawn data.
 
 ## Step 5 — Validate ownership and readiness
 Ensure:
-- agent belongs to the current user or accessible scope
-- runtime is connectable
-- required runtime fields are present
-- runtime type is supported
+- project belongs to the current user or accessible scope
+- project/runtime is connectable
+- required integration fields are present
+- engine/runtime type is supported
 
 ## Step 6 — Upsert MoziBoard `agents`
-Create or update a normalized agent identity.
+Create or update a normalized MoziBoard agent identity representing this Clawn project runtime.
 
 Recommended ID strategy:
-- `clawn:<clawn_agent_id>`
+- `clawn-project:<clawn_project_id>`
 
-This prevents collisions with manual agents or future external runtimes.
+This avoids collisions and reflects current Clawn reality.
 
 Fields to sync:
 - `id`
-- `name` / `display_name`
+- `display_name`
 - `provider = clawn`
 - `engine = openclaw | picoclaw | ...`
-- presence/status metadata when available
+- minimal presence/status metadata when available
 
 ## Step 7 — Upsert `agent_connectors`
 Create or update one native connector using server-resolved runtime metadata.
 
 Recommended defaults for initial Clawn integration:
 - `connector_type = clawn_native`
-- `transport_mode = internal`
 - `auth_type = machine_token`
 - `status = connected`
 
-MoziBoard should:
-- generate a machine token if one does not exist
-- hash and store it in `machine_token_hash`
-- store runtime metadata like `agent_ref`, `session_key`, `base_url`
-- optionally store a small metadata JSON with source context
+### Transport note
+For Phase 1, transport mode should only be marked `internal` if MoziBoard can resolve a stable dispatch path.
 
-Example metadata:
+If Clawn still does not expose stable runtime linkage, then the integration should either:
+- store the connector as partially configured but not dispatchable yet, or
+- use a reduced MVP where connection means "registered for future runtime bridge", not immediate event delivery
+
+This is safer than faking runtime linkage.
+
+## Step 8 — Store source metadata
+Example metadata JSON:
 ```json
 {
   "source": "clawn",
-  "clawn_agent_id": "clawn-agent-123",
-  "project_id": "proj_abc",
-  "runtime_type": "openclaw"
+  "clawn_project_id": "ec24c0f8-d99d-4c9e-b361-0e94d4698322",
+  "engine": "openclaw",
+  "status": "exited",
+  "linkage_mode": "project-centric"
 }
 ```
 
-## Step 8 — Upsert `board_agents`
-Attach the agent to the selected board with the chosen permissions.
+## Step 9 — Upsert `board_agents`
+Attach the runtime-backed agent to the selected board with the chosen permissions.
 
-## Step 9 — Return hydrated result
+## Step 10 — Return hydrated result
 Return the normalized agent + connector + board membership summary for the UI.
 
 ---
 
-# 10. Database Mapping Strategy
+# 11. Runtime Linkage Reality and Gap
 
-## 10.1 Agent identity
-MoziBoard should treat Clawn as a source of agent identity, not just connector transport.
+## 11.1 What is known today
+Audit findings indicate that Clawn exposes:
+- project-level identity
+- engine
+- status
+- project config
+- basic `agent-status` with agent id `main`
+- session listing endpoint
 
-Recommended internal mapping:
-- `agents.id = clawn:<clawn_agent_id>`
-- `agents.provider = clawn`
-- `agents.engine = <runtime engine from Clawn>`
+## 11.2 What is not safe to assume yet
+Do not assume that MoziBoard can safely and durably derive:
+- `agent_ref`
+- `session_key`
 
-This makes the data model explicit and future-safe.
+from current Clawn backend as a stable integration contract.
+
+There are hints of conventions in the frontend and current runtime design, but conventions are not enough for a robust connector contract.
+
+## 11.3 Recommended bridge contract to add in Clawn
+To unlock clean native dispatch, Clawn should eventually expose a dedicated endpoint such as:
+
+### `GET /api/projects/:id/moziboard-runtime`
+
+Example response:
+```json
+{
+  "project_id": "ec24c0f8-d99d-4c9e-b361-0e94d4698322",
+  "display_name": "aa",
+  "engine": "openclaw",
+  "status": "running",
+  "connectable": true,
+  "connector_type": "clawn_native",
+  "transport_mode": "internal",
+  "main_agent_id": "main",
+  "agent_ref": "main",
+  "session_key": "agent:main:main",
+  "linkage_confidence": "explicit"
+}
+```
+
+Once Clawn exposes something like this, MoziBoard can safely upgrade from project-centric integration to runtime-native dispatch.
 
 ---
 
-## 10.2 Connector mapping
-One Clawn agent should typically map to one primary native connector.
+# 12. Database Mapping Strategy
+
+## 12.1 Agent identity
+MoziBoard should treat Clawn as a source of runtime-backed agent identity.
+
+Recommended internal mapping for current reality:
+- `agents.id = clawn-project:<clawn_project_id>`
+- `agents.provider = clawn`
+- `agents.engine = <engine from Clawn project>`
+
+This is explicit and future-safe.
+
+---
+
+## 12.2 Connector mapping
+One Clawn project should typically map to one primary native connector.
 
 Recommended connector uniqueness rule for MVP:
 - one active primary connector per `(agent_id, connector_type, transport_mode)`
 
-If reconnecting the same Clawn agent:
+If reconnecting the same Clawn project:
 - update existing connector instead of creating duplicates when possible
 
 ---
 
-## 10.3 Board membership mapping
+## 12.3 Board membership mapping
 `board_agents` remains board-scoped.
 
-This means one Clawn agent can be attached to multiple boards later, subject to product rules.
+This means one Clawn-backed runtime source can be attached to multiple boards later, subject to product rules.
 
-For MVP, it is acceptable to allow the same agent on multiple boards if the user intentionally connects it.
+For MVP, it is acceptable to allow the same source on multiple boards if the user intentionally connects it.
 
 ---
 
-# 11. UI Blueprint
+# 13. UI Blueprint
 
-## 11.1 Modal structure
+## 13.1 Modal structure
 ### Modal title
 `Connect Agent from Clawn`
 
 ### Section A — Source list
-Search + filterable list of Clawn agents.
+Search + filterable list of Clawn projects/runtimes.
 
 Each card should show:
-- display name
-- project name
-- model
-- runtime type
+- display name / project name
+- engine
+- plan
 - status badge
-- readiness badge
+- capabilities summary
 - already connected badge
 
 ### Section B — Board behavior form
@@ -487,21 +614,22 @@ Secondary action:
 
 ---
 
-## 11.2 Empty states
-### No Clawn agents
+## 13.2 Empty states
+### No Clawn runtimes found
 Show:
-- `No Clawn agents found`
-- `Create or start an agent in Clawn first, then come back here.`
+- `No Clawn runtime projects found`
+- `Create or start a project in Clawn first, then come back here.`
 
-### Agent exists but not runtime-ready
+### Project exists but not connectable
 Show disabled item with reason, such as:
-- no active runtime session
-- runtime metadata missing
-- agent offline and not connectable yet
+- project not running
+- runtime bridge metadata missing
+- unsupported engine for current MVP
+- ownership mismatch
 
 ---
 
-## 11.3 Success state
+## 13.3 Success state
 After connect success:
 - close modal
 - refresh board agent list
@@ -510,9 +638,9 @@ After connect success:
 
 ---
 
-# 12. Security Rules
+# 14. Security Rules
 
-## 12.1 Frontend never submits internal runtime fields
+## 14.1 Frontend never submits runtime internals
 The frontend should never post:
 - `agent_ref`
 - `session_key`
@@ -522,37 +650,37 @@ The frontend should never post:
 
 Those must be resolved server-side.
 
-## 12.2 Server must verify ownership
-`clawn_agent_id` is not trusted by itself.
+## 14.2 Server must verify ownership
+`clawn_project_id` is not trusted by itself.
 Server must re-check ownership against authenticated user context.
 
-## 12.3 Machine token handling
+## 14.3 Machine token handling
 If machine tokens are used for runtime callbacks:
 - generate server-side only
 - store only token hash in DB
 - do not expose token back to the UI unless explicitly necessary
 - if Clawn runtime must receive a token, pass it through a trusted server-to-server path
 
-## 12.4 Auditability
+## 14.4 Auditability
 MoziBoard should log or record:
-- who connected the agent
+- who connected the runtime
 - which board it was connected to
 - when the connector was created/updated
 - what source integration was used
 
 ---
 
-# 13. Failure Modes and UX Handling
+# 15. Failure Modes and UX Handling
 
-## Failure: user no longer owns agent
+## Failure: user no longer owns project
 Return:
 - `403 forbidden`
-- UI message: `This Clawn agent is no longer available to your account.`
+- UI message: `This Clawn project is no longer available to your account.`
 
 ## Failure: runtime metadata incomplete
 Return:
 - `409 conflict`
-- UI message: `This agent exists but is not runtime-ready yet.`
+- UI message: `This project exists but is not runtime-ready for MoziBoard connection yet.`
 
 ## Failure: connector upsert succeeds but board attach fails
 Behavior:
@@ -566,142 +694,148 @@ Behavior:
 
 ---
 
-# 14. Transaction and Idempotency Guidance
+# 16. Transaction and Idempotency Guidance
 
 The connect flow should be treated as a transactional orchestration.
 
 Recommended order inside one transaction when possible:
 1. validate board access
-2. resolve Clawn agent
+2. resolve Clawn project
 3. upsert `agents`
 4. upsert `agent_connectors`
 5. upsert `board_agents`
 6. commit
 
 Idempotency rule:
-- connecting the same Clawn agent to the same board twice should not create duplicate board memberships or duplicate primary connectors
+- connecting the same Clawn project to the same board twice should not create duplicate board memberships or duplicate primary connectors
 
 ---
 
-# 15. Suggested Internal Components
+# 17. Suggested Internal Components
 
 ## Backend
-- `ClawnAgentProvider`
-  - lists agents for current user
+- `ClawnProjectProvider`
+  - lists projects for current user
   - resolves detailed runtime metadata
 
-- `ConnectClawnAgentService`
+- `ConnectClawnProjectService`
   - validates ownership
   - maps source payload into MoziBoard records
   - performs upserts/transaction
 
 - `MoziBoardAgentMapper`
-  - converts Clawn agent metadata into `agents` + `agent_connectors` shape
+  - converts Clawn project/runtime metadata into `agents` + `agent_connectors` shape
 
 ## Frontend
-- `ClawnAgentPickerModal`
-- `ClawnAgentList`
+- `ClawnProjectPickerModal`
+- `ClawnProjectList`
 - `ConnectAgentPermissionForm`
-- `useClawnAgents(boardId)`
-- `useConnectClawnAgent()`
+- `useClawnProjects(boardId)`
+- `useConnectClawnProject()`
 
 ---
 
-# 16. Phase Plan
+# 18. Phase Plan
 
 ## Phase 1 — Internal ecosystem MVP
-- MoziBoard can list Clawn agents for current user
-- user can connect one Clawn agent to a board
-- server auto-creates connector config
+- MoziBoard can list Clawn projects for current user
+- user can connect one Clawn project/runtime to a board
+- server auto-creates MoziBoard agent + connector config
 - board membership appears immediately
-- ops dashboard can inspect connector/event state
+- ops dashboard can inspect connection state
+- dispatch may remain limited until Clawn exposes stronger runtime linkage
 
-## Phase 2 — Operational polish
+## Phase 2 — Runtime contract hardening
+- Clawn exposes a MoziBoard-safe runtime metadata endpoint
+- MoziBoard can resolve stable dispatch references
+- true native event delivery becomes safe and explicit
+
+## Phase 3 — Operational polish
 - reconnect action
 - disconnect/detach action
 - already connected filters
 - health badges from runtime state
 - better empty/error states
 
-## Phase 3 — Multi-runtime evolution
+## Phase 4 — Multi-runtime evolution
 - support non-internal native runtimes
 - support remote HTTP Clawn runtimes
 - support pull/relay transport
-- unify picker model across Clawn, manual, and future runtimes
+- evolve from project-centric mapping to richer runtime/agent registry when Clawn is ready
 
 ---
 
-# 17. Recommended MVP Scope
+# 19. Recommended MVP Scope
 
-To ship quickly without over-designing:
+To ship quickly without pretending Clawn is more mature than it is:
 
 ## In scope
-- list current user's Clawn agents
-- only show runtime-ready agents
-- connect one agent to one board
-- internal native connector only
-- machine-token auth only
+- list current user's Clawn projects
+- show engine/status/capabilities
+- connect one project/runtime source to one board
+- project-centric MoziBoard agent identity
 - board permission form
 - idempotent connect behavior
 
 ## Out of scope for first pass
+- true multi-agent-per-project registry
 - bulk connect
-- cross-org shared agents
-- remote HTTP runtimes
+- cross-org shared runtimes
+- remote HTTP runtime support
 - pull relay setup
-- runtime token rotation UI
-- bi-directional settings sync back into Clawn
+- token rotation UI
+- deep bi-directional settings sync into Clawn
 
 ---
 
-# 18. Example MVP Sequence
+# 20. Example MVP Sequence
 
 ## User-visible flow
 1. User opens board
 2. User clicks `Register Agent`
 3. User chooses `From Clawn`
-4. MoziBoard lists eligible Clawn agents
-5. User selects `Kodinger 5.4`
+4. MoziBoard lists eligible Clawn projects
+5. User selects `aa`
 6. User enables `auto accept tasks`
 7. User clicks `Connect Agent`
-8. Board shows `Kodinger 5.4` as attached
-9. Ops Dashboard shows connector as `connected`
+8. Board shows the connected Clawn-backed agent source
+9. Ops Dashboard shows connector registration state
 
 ## Server flow
-1. `GET /api/integrations/clawn/agents?board_id=...`
-2. user picks `clawn-agent-123`
+1. `GET /api/integrations/clawn/projects?board_id=...`
+2. user picks `clawn_project_id`
 3. `POST /api/integrations/clawn/connect`
-4. MoziBoard resolves Clawn runtime metadata
+4. MoziBoard resolves Clawn project/runtime metadata
 5. MoziBoard upserts agent + connector + board membership
 6. response returns success payload
 
 ---
 
-# 19. Why This Matters Strategically
+# 21. Strategic Significance
 
-This flow is not just a convenience feature.
-It is the bridge between:
+This flow is the bridge between:
 - **Clawn as the runtime ecosystem**
 - **MoziBoard as the mission control layer**
 
-If this flow is smooth, then MoziBoard becomes the operational cockpit while Clawn remains the easiest native source of agent supply.
+Even with the current project-centric limitation, this is still strategically correct.
 
-That creates a clean ecosystem story:
-- create/manage your agents in Clawn
-- assign/orchestrate them in MoziBoard
+It creates a practical ecosystem story:
+- create/manage your runtime projects in Clawn
+- attach and orchestrate them in MoziBoard
 
-This is the right separation of responsibility.
+Later, when Clawn grows a stronger runtime or agent registry, MoziBoard can upgrade the integration without throwing away the UX.
 
 ---
 
-# 20. Recommendation
+# 22. Recommendation
 
-Build this as a first-class **Agent Picker**, not as a manual connector helper.
+Build this as a first-class **Clawn source picker**, but implement it against **project-backed runtime sources** for now.
 
-The implementation priority should be:
-1. backend integration facade for Clawn agent listing + connect
+Implementation priority should be:
+1. backend integration facade for Clawn project listing + connect
 2. Register Agent modal with Clawn source picker
 3. idempotent auto-connect orchestration
-4. ops visibility after connection
+4. Clawn runtime metadata contract hardening
+5. native dispatch once runtime linkage is explicit and safe
 
-That gives MoziBoard the first real native user flow for ecosystem-grade agent onboarding.
+That gives MoziBoard a real native onboarding flow without lying to itself about Clawn's current backend maturity.
