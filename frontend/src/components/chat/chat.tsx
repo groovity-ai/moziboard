@@ -21,6 +21,9 @@ export type ChatProps = {
   /** Auto-send this message when history is empty after loading */
   autoSendMessage?: string;
   projectId?: string | null;
+  title?: string;
+  subtitle?: string;
+  runtimeStatus?: string;
 };
 
 export const Chat = ({
@@ -31,6 +34,9 @@ export const Chat = ({
   hideHeader = false,
   autoSendMessage,
   projectId,
+  title,
+  subtitle,
+  runtimeStatus,
 }: ChatProps) => {
   const {
     messages,
@@ -42,6 +48,8 @@ export const Chat = ({
     abort,
     isLoading,
     isStreaming,
+    isConnected,
+    connectionLabel,
   } = useChat({ sessionKey, projectId });
 
   const { scrollRef, showScrollButton, scrollToBottom } = useAutoScroll();
@@ -95,7 +103,16 @@ export const Chat = ({
       )}
     >
       {!hideHeader && (
-        <ChatHeader mode={mode} onClose={onClose} isStreaming={isStreaming} />
+        <ChatHeader
+          mode={mode}
+          onClose={onClose}
+          isStreaming={isStreaming}
+          title={title}
+          subtitle={subtitle}
+          runtimeStatus={runtimeStatus}
+          isConnected={isConnected}
+          connectionLabel={connectionLabel}
+        />
       )}
 
       <div className="relative min-h-0 flex-1">

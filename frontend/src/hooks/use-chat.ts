@@ -30,6 +30,8 @@ export type UseChatReturn = {
     abort: () => void;
     isLoading: boolean;
     isStreaming: boolean;
+    isConnected: boolean;
+    connectionLabel: string;
 };
 
 const generateId = () => `msg_${Date.now()}_${Math.random().toString(36).slice(2)}`;
@@ -44,6 +46,8 @@ export const useChat = ({
     const [input, setInput] = useState("");
     const [status, setStatus] = useState<"idle" | "loading" | "streaming" | "error">("idle");
     const [error, setError] = useState<Error | null>(null);
+    const [isConnected, setIsConnected] = useState(false);
+    const [connectionLabel, setConnectionLabel] = useState("Connecting...");
 
     const wsRef = useRef<WebSocket | null>(null);
     const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -63,12 +67,15 @@ export const useChat = ({
         }
         const wsUrl = `${protocol}//${host}/api/projects/${projectId}/ws?${query.toString()}`;
 
+        setConnectionLabel(retryCountRef.current > 0 ? `Reconnecting (${retryCountRef.current})...` : 'Connecting...');
         console.log(`[use-chat WS] Connecting to ${wsUrl}...`);
         const ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
             console.log('[use-chat WS] Connected');
             isConnectedRef.current = true;
+            setIsConnected(true);
+            setConnectionLabel('Connected');
             retryCountRef.current = 0;
         };
 
@@ -84,6 +91,8 @@ export const useChat = ({
         ws.onclose = (event) => {
             console.log('[use-chat WS] Closed', event.code, event.reason);
             isConnectedRef.current = false;
+            setIsConnected(false);
+            setConnectionLabel(event.code === 1000 ? 'Disconnected' : 'Reconnecting...');
             wsRef.current = null;
 
             // Reconnect logic
@@ -94,6 +103,8 @@ export const useChat = ({
 
         ws.onerror = (err) => {
             console.error('[use-chat WS] Error:', err);
+            setIsConnected(false);
+            setConnectionLabel('Connection error');
             ws.close();
         };
 
@@ -105,6 +116,8 @@ export const useChat = ({
         setMessages([]);
         setStatus("idle");
         setError(null);
+        setIsConnected(false);
+        setConnectionLabel(projectId ? 'Connecting...' : 'No runtime selected');
 
         if (wsRef.current) {
             wsRef.current.close();
@@ -275,5 +288,7 @@ export const useChat = ({
         abort,
         isLoading: status === "loading",
         isStreaming: status === "streaming",
+        isConnected,
+        connectionLabel,
     };
 };

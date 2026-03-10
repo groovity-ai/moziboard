@@ -204,6 +204,8 @@ export function DashboardSidebar({
                                                         agentId: agent.id,
                                                         projectId: resolveChatProjectId(agent.id),
                                                         displayName: agent.display_name || agent.id,
+                                                        runtimeStatus: agent.status || 'unknown',
+                                                        subtitle: agent.provider === 'clawn' ? `Clawn • ${agent.engine || 'runtime'}` : (agent.engine || agent.provider || 'runtime'),
                                                     });
                                                     openChat();
                                                     toast.success(`Connected to ${agent.display_name || agent.id}`);

@@ -19,6 +19,9 @@ export const ChatPanel = () => {
                     <Chat
                         sessionKey={`mozi:global:${activeTarget.agentId}`}
                         projectId={activeTarget.projectId || activeTarget.agentId}
+                        title={activeTarget.displayName || activeTarget.agentId}
+                        subtitle={activeTarget.subtitle || activeTarget.projectId || activeTarget.agentId}
+                        runtimeStatus={activeTarget.runtimeStatus || 'unknown'}
                         mode="panel"
                         onClose={close}
                         className="h-full border-l-0"

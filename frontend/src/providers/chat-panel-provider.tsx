@@ -6,6 +6,8 @@ export type ChatTarget = {
   agentId: string;
   projectId?: string | null;
   displayName?: string | null;
+  runtimeStatus?: string | null;
+  subtitle?: string | null;
 };
 
 type ChatPanelContextValue = {
