@@ -681,7 +681,11 @@ func main() {
 	app.Get("/api/agents/:id/runs", getAgentRunsForAgent)
 	app.Get("/api/agents/:id/notifications", getAgentNotifications)
 	app.Get("/api/ops/agent-events", getAgentEventsOps)
+	app.Post("/api/ops/agent-events/:id/retry", retryAgentEventOps)
+	app.Post("/api/ops/agent-events/:id/requeue", requeueAgentEventOps)
 	app.Get("/api/ops/connectors", getAgentConnectorsOps)
+	app.Post("/api/ops/connectors/:id/enable", enableAgentConnectorOps)
+	app.Post("/api/ops/connectors/:id/disable", disableAgentConnectorOps)
 	app.Post("/api/agents/:id/heartbeat", heartbeatAgent)
 	app.Put("/api/agents/:id/status", updateAgentStatus)
 	app.Get("/api/agents/sync/aiagenz", getAiAgenzProjects)
@@ -2322,6 +2326,54 @@ func getAgentConnectorsOps(c *fiber.Ctx) error {
 	}
 	if items == nil { items = []AgentConnector{} }
 	return c.JSON(items)
+}
+
+func retryAgentEventOps(c *fiber.Ctx) error {
+	eventID := c.Params("id")
+	cmd, err := db.Exec(context.Background(), `
+		UPDATE agent_events
+		SET delivery_status='pending', next_attempt_at=CURRENT_TIMESTAMP, processed_at=NULL, response_status='manual_retry_requested', response_body=''
+		WHERE id=$1 AND delivery_status IN ('failed','processing')`, eventID)
+	if err != nil { return c.Status(500).SendString(err.Error()) }
+	if cmd.RowsAffected() == 0 {
+		return c.Status(404).JSON(fiber.Map{"error": "event_not_retryable"})
+	}
+	go deliverPendingAgentEvents()
+	return c.JSON(fiber.Map{"ok": true, "action": "retry", "event_id": eventID})
+}
+
+func requeueAgentEventOps(c *fiber.Ctx) error {
+	eventID := c.Params("id")
+	cmd, err := db.Exec(context.Background(), `
+		UPDATE agent_events
+		SET delivery_status='pending', delivery_attempts=0, next_attempt_at=CURRENT_TIMESTAMP, processed_at=NULL, response_status='manual_requeue_requested', response_body=''
+		WHERE id=$1 AND delivery_status IN ('dead','failed','ignored','routed')`, eventID)
+	if err != nil { return c.Status(500).SendString(err.Error()) }
+	if cmd.RowsAffected() == 0 {
+		return c.Status(404).JSON(fiber.Map{"error": "event_not_requeueable"})
+	}
+	go deliverPendingAgentEvents()
+	return c.JSON(fiber.Map{"ok": true, "action": "requeue", "event_id": eventID})
+}
+
+func enableAgentConnectorOps(c *fiber.Ctx) error {
+	connectorID := c.Params("id")
+	cmd, err := db.Exec(context.Background(), `UPDATE agent_connectors SET status='connected', updated_at=CURRENT_TIMESTAMP WHERE id=$1`, connectorID)
+	if err != nil { return c.Status(500).SendString(err.Error()) }
+	if cmd.RowsAffected() == 0 {
+		return c.Status(404).JSON(fiber.Map{"error": "connector_not_found"})
+	}
+	return c.JSON(fiber.Map{"ok": true, "action": "enable", "connector_id": connectorID})
+}
+
+func disableAgentConnectorOps(c *fiber.Ctx) error {
+	connectorID := c.Params("id")
+	cmd, err := db.Exec(context.Background(), `UPDATE agent_connectors SET status='disabled', updated_at=CURRENT_TIMESTAMP WHERE id=$1`, connectorID)
+	if err != nil { return c.Status(500).SendString(err.Error()) }
+	if cmd.RowsAffected() == 0 {
+		return c.Status(404).JSON(fiber.Map{"error": "connector_not_found"})
+	}
+	return c.JSON(fiber.Map{"ok": true, "action": "disable", "connector_id": connectorID})
 }
 
 func heartbeatAgent(c *fiber.Ctx) error {

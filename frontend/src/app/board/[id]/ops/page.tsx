@@ -16,7 +16,11 @@ import {
   DrawerTitle,
 } from '@/components/ui/drawer';
 
-const fetcher = (url: string) => fetch(url).then((res) => res.json());
+const fetcher = async (url: string) => {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+};
 
 type AgentEvent = {
   id: number;
@@ -70,7 +74,7 @@ function SummaryCard({ label, value, tone = 'default' }: { label: string; value:
 
 function StatusPill({ value }: { value?: string }) {
   const v = (value || 'unknown').toLowerCase();
-  const cls = v === 'failed' || v === 'dead'
+  const cls = v === 'failed' || v === 'dead' || v === 'disabled'
     ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
     : v === 'sent' || v === 'connected'
     ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
@@ -111,6 +115,9 @@ export default function OpsPage() {
   const [connectorType, setConnectorType] = useState('');
   const [selectedEvent, setSelectedEvent] = useState<AgentEvent | null>(null);
   const [selectedConnector, setSelectedConnector] = useState<AgentConnector | null>(null);
+  const [eventActionLoading, setEventActionLoading] = useState<string | null>(null);
+  const [connectorActionLoading, setConnectorActionLoading] = useState<string | null>(null);
+  const [banner, setBanner] = useState<{ tone: 'success' | 'danger'; text: string } | null>(null);
 
   const eventsUrl = useMemo(() => {
     const q = new URLSearchParams();
@@ -137,6 +144,48 @@ export default function OpsPage() {
   const activeConnectors = connectors.filter((c) => c.status === 'connected').length;
   const retryingCount = events.filter((e) => !!e.next_attempt_at && e.delivery_status === 'failed').length;
 
+  async function runEventAction(action: 'retry' | 'requeue') {
+    if (!selectedEvent) return;
+    const key = `${action}:${selectedEvent.id}`;
+    setEventActionLoading(key);
+    setBanner(null);
+    try {
+      const res = await fetch(`/api/ops/agent-events/${selectedEvent.id}/${action}`, { method: 'POST' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `${action} failed`);
+      setBanner({ tone: 'success', text: `Event #${selectedEvent.id} ${action} requested.` });
+      await mutateEvents();
+      const refreshed = (await fetcher(eventsUrl)) as AgentEvent[];
+      const updated = refreshed.find((item) => item.id === selectedEvent.id) || null;
+      setSelectedEvent(updated);
+    } catch (error) {
+      setBanner({ tone: 'danger', text: error instanceof Error ? error.message : `Failed to ${action} event.` });
+    } finally {
+      setEventActionLoading(null);
+    }
+  }
+
+  async function runConnectorAction(action: 'enable' | 'disable') {
+    if (!selectedConnector) return;
+    const key = `${action}:${selectedConnector.id}`;
+    setConnectorActionLoading(key);
+    setBanner(null);
+    try {
+      const res = await fetch(`/api/ops/connectors/${selectedConnector.id}/${action}`, { method: 'POST' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `${action} failed`);
+      setBanner({ tone: 'success', text: `Connector #${selectedConnector.id} ${action}d.` });
+      await mutateConnectors();
+      const refreshed = (await fetcher(connectorsUrl)) as AgentConnector[];
+      const updated = refreshed.find((item) => item.id === selectedConnector.id) || null;
+      setSelectedConnector(updated);
+    } catch (error) {
+      setBanner({ tone: 'danger', text: error instanceof Error ? error.message : `Failed to ${action} connector.` });
+    } finally {
+      setConnectorActionLoading(null);
+    }
+  }
+
   return (
     <>
       <div className="flex h-full w-full flex-col">
@@ -162,6 +211,12 @@ export default function OpsPage() {
 
         <div className="flex-1 overflow-auto p-6">
           <div className="mx-auto max-w-7xl space-y-6">
+            {banner && (
+              <div className={`rounded-xl border px-4 py-3 text-sm ${banner.tone === 'success' ? 'border-green-200 bg-green-50 text-green-800 dark:border-green-900/30 dark:bg-green-900/10 dark:text-green-300' : 'border-red-200 bg-red-50 text-red-800 dark:border-red-900/30 dark:bg-red-900/10 dark:text-red-300'}`}>
+                {banner.text}
+              </div>
+            )}
+
             <div className="grid gap-4 md:grid-cols-3">
               <SummaryCard label="Failed / Dead Events" value={String(failedCount)} tone={failedCount > 0 ? 'danger' : 'success'} />
               <SummaryCard label="Retry Scheduled" value={String(retryingCount)} />
@@ -175,7 +230,7 @@ export default function OpsPage() {
               </div>
               <div className="mb-3 flex flex-wrap gap-2">
                 {['', 'failed', 'dead', 'sent', 'processing'].map((preset) => (
-                  <Button key={preset || 'all-events'} variant={eventStatus === preset ? 'default' : 'outline'} size='sm' onClick={() => setEventStatus(preset)}>
+                  <Button key={preset || 'all-events'} variant={eventStatus === preset ? 'default' : 'outline'} size="sm" onClick={() => setEventStatus(preset)}>
                     {preset || 'All'}
                   </Button>
                 ))}
@@ -201,15 +256,15 @@ export default function OpsPage() {
                   </thead>
                   <tbody>
                     {events.map((ev) => (
-                      <tr key={ev.id} className="border-b align-top hover:bg-muted/30 cursor-pointer" onClick={() => setSelectedEvent(ev)}>
+                      <tr key={ev.id} className="cursor-pointer border-b align-top hover:bg-muted/30" onClick={() => setSelectedEvent(ev)}>
                         <td className="px-2 py-2 font-mono text-xs">#{ev.id}</td>
                         <td className="px-2 py-2">{ev.agent_id}</td>
                         <td className="px-2 py-2">{ev.event_type}</td>
                         <td className="px-2 py-2"><StatusPill value={ev.delivery_status} /></td>
                         <td className="px-2 py-2">{ev.delivery_attempts}</td>
                         <td className="px-2 py-2 text-xs text-muted-foreground">{ev.next_attempt_at ? new Date(ev.next_attempt_at).toLocaleString() : '-'}</td>
-                        <td className="px-2 py-2 text-xs text-muted-foreground max-w-[320px] truncate">{ev.response_status || '-'}</td>
-                        <td className="px-2 py-2 text-right text-muted-foreground"><ChevronRight className='h-4 w-4 inline' /></td>
+                        <td className="max-w-[320px] truncate px-2 py-2 text-xs text-muted-foreground">{ev.response_status || '-'}</td>
+                        <td className="px-2 py-2 text-right text-muted-foreground"><ChevronRight className="inline h-4 w-4" /></td>
                       </tr>
                     ))}
                     {!loadingEvents && events.length === 0 && (
@@ -226,8 +281,8 @@ export default function OpsPage() {
                 Connectors
               </div>
               <div className="mb-3 flex flex-wrap gap-2">
-                {['', 'connected', 'pending', 'failed'].map((preset) => (
-                  <Button key={preset || 'all-connectors'} variant={connectorStatus === preset ? 'default' : 'outline'} size='sm' onClick={() => setConnectorStatus(preset)}>
+                {['', 'connected', 'pending', 'failed', 'disabled'].map((preset) => (
+                  <Button key={preset || 'all-connectors'} variant={connectorStatus === preset ? 'default' : 'outline'} size="sm" onClick={() => setConnectorStatus(preset)}>
                     {preset || 'All'}
                   </Button>
                 ))}
@@ -253,15 +308,15 @@ export default function OpsPage() {
                   </thead>
                   <tbody>
                     {connectors.map((conn) => (
-                      <tr key={conn.id} className="border-b align-top hover:bg-muted/30 cursor-pointer" onClick={() => setSelectedConnector(conn)}>
+                      <tr key={conn.id} className="cursor-pointer border-b align-top hover:bg-muted/30" onClick={() => setSelectedConnector(conn)}>
                         <td className="px-2 py-2 font-mono text-xs">#{conn.id}</td>
                         <td className="px-2 py-2">{conn.agent_id}</td>
                         <td className="px-2 py-2">{conn.connector_type}</td>
                         <td className="px-2 py-2">{conn.transport_mode}</td>
-                        <td className="px-2 py-2"><Badge variant='outline'>{conn.auth_type}</Badge></td>
+                        <td className="px-2 py-2"><Badge variant="outline">{conn.auth_type}</Badge></td>
                         <td className="px-2 py-2"><StatusPill value={conn.status} /></td>
                         <td className="px-2 py-2 text-xs text-muted-foreground">{conn.endpoint_url || conn.agent_ref || conn.session_key || '-'}</td>
-                        <td className="px-2 py-2 text-right text-muted-foreground"><ChevronRight className='h-4 w-4 inline' /></td>
+                        <td className="px-2 py-2 text-right text-muted-foreground"><ChevronRight className="inline h-4 w-4" /></td>
                       </tr>
                     ))}
                     {!loadingConnectors && connectors.length === 0 && (
@@ -283,6 +338,23 @@ export default function OpsPage() {
           </DrawerHeader>
           {selectedEvent && (
             <div className="space-y-4 overflow-auto p-4">
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => runEventAction('retry')}
+                  disabled={!['failed', 'processing'].includes(selectedEvent.delivery_status) || eventActionLoading !== null}
+                >
+                  {eventActionLoading === `retry:${selectedEvent.id}` ? 'Retrying...' : 'Retry now'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => runEventAction('requeue')}
+                  disabled={!['dead', 'failed', 'ignored', 'routed'].includes(selectedEvent.delivery_status) || eventActionLoading !== null}
+                >
+                  {eventActionLoading === `requeue:${selectedEvent.id}` ? 'Requeueing...' : 'Requeue'}
+                </Button>
+              </div>
               <div className="grid gap-3">
                 <DetailRow label="Agent" value={selectedEvent.agent_id} />
                 <DetailRow label="Event Type" value={selectedEvent.event_type} />
@@ -317,6 +389,23 @@ export default function OpsPage() {
           </DrawerHeader>
           {selectedConnector && (
             <div className="space-y-4 overflow-auto p-4">
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => runConnectorAction('enable')}
+                  disabled={selectedConnector.status === 'connected' || connectorActionLoading !== null}
+                >
+                  {connectorActionLoading === `enable:${selectedConnector.id}` ? 'Enabling...' : 'Enable connector'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => runConnectorAction('disable')}
+                  disabled={selectedConnector.status === 'disabled' || connectorActionLoading !== null}
+                >
+                  {connectorActionLoading === `disable:${selectedConnector.id}` ? 'Disabling...' : 'Disable connector'}
+                </Button>
+              </div>
               <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
                 <Shield className="h-4 w-4" /> Auth & routing
               </div>
