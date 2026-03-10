@@ -5,6 +5,7 @@ import { useParams, usePathname, useRouter } from "next/navigation";
 import { LayoutDashboard, SquareKanban, FileText, Settings, Bot, MessageSquare, ActivitySquare } from "lucide-react";
 import { useChatPanel } from "@/providers/chat-panel-provider";
 import { toast } from "sonner";
+import { buildAuthHeaders } from "@/lib/auth";
 
 import {
     Sidebar,
@@ -34,7 +35,10 @@ export function DashboardSidebar({
     React.useEffect(() => {
         const fetchAgents = async () => {
             try {
-                const res = await fetch('/api/agents/sync/aiagenz');
+                const res = await fetch('/api/agents/sync/aiagenz', {
+                    headers: buildAuthHeaders(),
+                    credentials: 'include',
+                });
                 if (res.ok) {
                     const data = await res.json();
                     setAgents(Array.isArray(data) ? data : data.data || []);

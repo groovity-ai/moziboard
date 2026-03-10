@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { CheckCircle2, Copy, Link as LinkIcon, Rocket, Webhook, X, Bot, ShieldCheck, Network, Search, FolderGit2, PlugZap } from 'lucide-react';
 import { toast } from 'sonner';
+import { buildAuthHeaders } from '@/lib/auth';
 
 type Provider = 'external' | 'clawn';
 type Engine = 'webhook' | 'rest' | 'openclaw' | 'picoclaw';
@@ -108,7 +109,10 @@ export function RegisterAgentModal({ boardId, isOpen, onClose, onSuccess }: Regi
     const run = async () => {
       try {
         setClawnLoading(true);
-        const res = await fetch(`/api/integrations/clawn/projects?board_id=${boardId}`);
+        const res = await fetch(`/api/integrations/clawn/projects?board_id=${boardId}`, {
+          headers: buildAuthHeaders(),
+          credentials: 'include',
+        });
         const data = await res.json().catch(() => []);
         if (!res.ok) throw new Error(data?.error || 'Failed to load Clawn projects');
         if (!cancelled) setClawnProjects(Array.isArray(data) ? data : []);
@@ -180,7 +184,8 @@ export function RegisterAgentModal({ boardId, isOpen, onClose, onSuccess }: Regi
         if (!selectedClawnProjectId) throw new Error('Pilih project Clawn dulu');
         const connRes = await fetch('/api/integrations/clawn/connect', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+          credentials: 'include',
           body: JSON.stringify({
             board_id: boardId,
             clawn_project_id: selectedClawnProjectId,
