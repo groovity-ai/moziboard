@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Task } from './Board';
-import { X, Send, User, MessageCircle, PackageCheck, History, LayoutList, AlertTriangle, Pencil, Eye } from 'lucide-react';
+import { X, Send, User, MessageCircle, PackageCheck, History, LayoutList, AlertTriangle, Pencil, Eye, CheckCircle2, Bot, Sparkles } from 'lucide-react';
 import useSWR, { mutate } from 'swr';
 import ReactMarkdown from 'react-markdown';
 import { RichTextEditor } from './ui/rich-text-editor';
@@ -68,12 +68,12 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
   const [isEditingDescription, setIsEditingDescription] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  const { data: boards } = useSWR<any[]>('/api/boards', fetcher);
-  const { data: members } = useSWR<Member[]>(task.board_id ? `/api/boards/${task.board_id}/members` : null, fetcher);
-  const { data: activities } = useSWR<Activity[]>(task.id ? `/api/tasks/${task.id}/activities` : null, fetcher);
-  const { data: deliverables } = useSWR<Deliverable[]>(task.id ? `/api/tasks/${task.id}/deliverables` : null, fetcher);
-  const { data: comments } = useSWR<Comment[]>(task.id ? `/api/tasks/${task.id}/comments` : null, fetcher, { refreshInterval: 5000 });
-  const { data: session } = useSWR<{ id: string }>('/api/auth/me', fetcher);
+  const { data: boards } = useSWR<any[]>(isOpen ? '/api/boards' : null, fetcher);
+  const { data: members } = useSWR<Member[]>(isOpen && task.board_id ? `/api/boards/${task.board_id}/members` : null, fetcher);
+  const { data: activities } = useSWR<Activity[]>(isOpen && activeTab === 'activity' && task.id ? `/api/tasks/${task.id}/activities` : null, fetcher);
+  const { data: deliverables } = useSWR<Deliverable[]>(isOpen && activeTab === 'deliverables' && task.id ? `/api/tasks/${task.id}/deliverables` : null, fetcher);
+  const { data: comments } = useSWR<Comment[]>(isOpen && activeTab === 'discussion' && task.id ? `/api/tasks/${task.id}/comments` : null, fetcher, { refreshInterval: isOpen && activeTab === 'discussion' ? 5000 : 0 });
+  const { data: session } = useSWR<{ id: string }>(isOpen ? '/api/auth/me' : null, fetcher);
 
   useEffect(() => {
     setDescription(task.description || '');
@@ -255,9 +255,9 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
                     <div className="rounded-2xl border p-4 dark:border-zinc-800">
                       <div className="mb-3 text-sm font-semibold">Quick Signals</div>
                       <div className="grid grid-cols-2 gap-3 text-sm">
-                        <SignalCard label="Comments" value={String(comments?.length || 0)} />
-                        <SignalCard label="Deliverables" value={String(deliverables?.length || 0)} />
-                        <SignalCard label="Activity" value={String(activities?.length || 0)} />
+                        <SignalCard label="Comments" value="Open Discussion" />
+                        <SignalCard label="Deliverables" value="Open Deliverables" />
+                        <SignalCard label="Activity" value="Open Activity" />
                         <SignalCard label="Status" value={task.status || task.list_id} />
                       </div>
                     </div>

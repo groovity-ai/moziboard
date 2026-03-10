@@ -9,14 +9,19 @@ import (
 type EmbeddingUpdater func(id int, text string)
 type Embedder func(text string) (string, error)
 
+type BoardStatsUpdater interface {
+	RecomputeBoard(ctx context.Context, boardID string) error
+}
+
 type Service struct {
 	repo            *Repository
 	embeddingUpdate EmbeddingUpdater
 	embedder        Embedder
+	boardStats      BoardStatsUpdater
 }
 
-func NewService(repo *Repository, embeddingUpdate EmbeddingUpdater, embedder Embedder) *Service {
-	return &Service{repo: repo, embeddingUpdate: embeddingUpdate, embedder: embedder}
+func NewService(repo *Repository, embeddingUpdate EmbeddingUpdater, embedder Embedder, boardStats BoardStatsUpdater) *Service {
+	return &Service{repo: repo, embeddingUpdate: embeddingUpdate, embedder: embedder, boardStats: boardStats}
 }
 
 func (s *Service) ListByBoard(ctx context.Context, boardID string) ([]Document, error) {
@@ -34,6 +39,9 @@ func (s *Service) Create(ctx context.Context, boardID string, d *Document) error
 	d.BoardID = boardID
 	if s.embeddingUpdate != nil {
 		go s.embeddingUpdate(d.ID, d.Title+" "+d.Content)
+	}
+	if s.boardStats != nil {
+		go s.boardStats.RecomputeBoard(context.Background(), boardID)
 	}
 	return nil
 }
@@ -59,11 +67,25 @@ func (s *Service) Update(ctx context.Context, id int, patch *Document) (Document
 	if s.embeddingUpdate != nil {
 		go s.embeddingUpdate(updated.ID, updated.Title+" "+updated.Content)
 	}
+	if s.boardStats != nil {
+		go s.boardStats.RecomputeBoard(context.Background(), updated.BoardID)
+	}
 	return updated, nil
 }
 
 func (s *Service) Delete(ctx context.Context, id int) (bool, error) {
-	return s.repo.Delete(ctx, id)
+	existing, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	deleted, err := s.repo.Delete(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	if deleted && s.boardStats != nil {
+		go s.boardStats.RecomputeBoard(context.Background(), existing.BoardID)
+	}
+	return deleted, nil
 }
 
 func (s *Service) Search(ctx context.Context, boardID, query string) ([]Document, error) {

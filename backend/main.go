@@ -18,25 +18,33 @@ import (
 	"time"
 
 	"github.com/gofiber/contrib/websocket"
+	"github.com/google/uuid"
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/sashabaranov/go-openai"
 	agentinframodule "moziboard-backend/internal/modules/agentinfra"
 	agentsmodule "moziboard-backend/internal/modules/agents"
+	activityfeedmodule "moziboard-backend/internal/modules/activityfeed"
+	attentionmodule "moziboard-backend/internal/modules/attention"
 	authproxymodule "moziboard-backend/internal/modules/authproxy"
+	boardhealthmodule "moziboard-backend/internal/modules/boardhealth"
 	boardmodule "moziboard-backend/internal/modules/boards"
+	boardstatsmodule "moziboard-backend/internal/modules/boardstats"
 	clawnmodule "moziboard-backend/internal/modules/clawn"
 	commentsmodule "moziboard-backend/internal/modules/comments"
 	deliverablesmodule "moziboard-backend/internal/modules/deliverables"
 	deliverymodule "moziboard-backend/internal/modules/delivery"
 	dispatchmodule "moziboard-backend/internal/modules/dispatch"
 	docsmodule "moziboard-backend/internal/modules/docs"
+	homemodule "moziboard-backend/internal/modules/home"
 	opsmodule "moziboard-backend/internal/modules/ops"
 	runtimemodule "moziboard-backend/internal/modules/runtime"
 	taskrunsmodule "moziboard-backend/internal/modules/taskruns"
 	tasksmodule "moziboard-backend/internal/modules/tasks"
 	platformai "moziboard-backend/internal/platform/ai"
+	"moziboard-backend/internal/platform/authsession"
+	"moziboard-backend/internal/platform/authz"
 	"moziboard-backend/internal/platform/cache"
 	"moziboard-backend/internal/platform/config"
 	platformdb "moziboard-backend/internal/platform/db"
@@ -382,6 +390,29 @@ func initDB() {
 		processed_at TIMESTAMP NULL
 	);`)
 
+	db.Exec(context.Background(), `
+	CREATE TABLE IF NOT EXISTS board_stats (
+		board_id UUID PRIMARY KEY REFERENCES boards(id) ON DELETE CASCADE,
+		open_tasks INT DEFAULT 0,
+		review_tasks INT DEFAULT 0,
+		blocked_tasks INT DEFAULT 0,
+		docs_count INT DEFAULT 0,
+		connected_agents INT DEFAULT 0,
+		agent_issues INT DEFAULT 0,
+		last_task_event_at TIMESTAMP NULL,
+		last_doc_event_at TIMESTAMP NULL,
+		last_agent_event_at TIMESTAMP NULL,
+		last_event_at TIMESTAMP NULL,
+		computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);`)
+	db.Exec(context.Background(), "CREATE INDEX IF NOT EXISTS idx_board_stats_last_event_at ON board_stats(last_event_at DESC)")
+	db.Exec(context.Background(), "CREATE INDEX IF NOT EXISTS idx_tasks_board_status ON tasks(board_id, status)")
+	db.Exec(context.Background(), "CREATE INDEX IF NOT EXISTS idx_documents_board_updated_at ON documents(board_id, updated_at DESC)")
+	db.Exec(context.Background(), "CREATE INDEX IF NOT EXISTS idx_activities_task_created_at ON activities(task_id, created_at DESC)")
+	db.Exec(context.Background(), "CREATE INDEX IF NOT EXISTS idx_board_agents_board_active ON board_agents(board_id, active)")
+	db.Exec(context.Background(), "CREATE INDEX IF NOT EXISTS idx_agent_events_board_created_at ON agent_events(board_id, created_at DESC)")
+	db.Exec(context.Background(), "CREATE INDEX IF NOT EXISTS idx_agent_events_board_delivery_at ON agent_events(board_id, last_delivery_at DESC)")
+
 	seedMembers()
 	seedBoardMembers()
 
@@ -532,10 +563,65 @@ func main() {
 	app.Get("/ws", websocket.New(wsHub.HandleConnection))
 	app.Get("/api/health", func(c *fiber.Ctx) error { return c.JSON(fiber.Map{"status": "ok"}) })
 
+	app.Use(func(c *fiber.Ctx) error {
+		if strings.HasPrefix(c.Path(), "/api/") {
+			requestID := c.Get("X-Request-ID")
+			if strings.TrimSpace(requestID) == "" {
+				requestID = uuid.NewString()
+			}
+			c.Set("X-Request-ID", requestID)
+			c.Locals("request_id", requestID)
+			start := time.Now()
+			err := c.Next()
+			log.Printf("api_request request_id=%s method=%s path=%s status=%d duration_ms=%d", requestID, c.Method(), c.Path(), c.Response().StatusCode(), time.Since(start).Milliseconds())
+			return err
+		}
+		return c.Next()
+	})
+
+	authSession := authsession.New("http://172.17.0.1:4001")
+	app.Use(func(c *fiber.Ctx) error {
+		if c.Path() == "/api/health" {
+			return c.Next()
+		}
+		return authSession.RequireAuth(c)
+	})
+
+	boardAuthz := authz.NewBoardAuthorizer(db)
+	requireBoardAuth := boardAuthz.RequireBoardAccess("id")
+	requireTaskAuth := boardAuthz.RequireTaskAccess("id")
+	requireDocAuth := boardAuthz.RequireDocumentAccess("id")
+	requireBoardFromBody := boardAuthz.RequireBoardAccessFromBody("board_id")
+	requireBoardFromQuery := boardAuthz.RequireBoardAccessFromQuery("board_id")
+
 	boardRepo := boardmodule.NewRepository(db)
 	boardSvc := boardmodule.NewService(boardRepo)
-	boardHandler := boardmodule.NewHandler(boardSvc)
+	boardHandler := boardmodule.NewHandler(boardSvc, requireBoardAuth)
 	boardHandler.RegisterRoutes(app)
+
+	boardStatsRepo := boardstatsmodule.NewRepository(db)
+	boardStatsSvc := boardstatsmodule.NewService(boardStatsRepo, rdb)
+	if err := boardStatsSvc.RecomputeAll(context.Background()); err != nil {
+		log.Printf("board_stats recompute failed on startup: %v", err)
+	}
+	boardStatsHandler := boardstatsmodule.NewHandler(boardStatsSvc, requireBoardAuth)
+	boardStatsHandler.RegisterRoutes(app)
+
+	activityfeedRepo := activityfeedmodule.NewRepository(db)
+	activityfeedSvc := activityfeedmodule.NewService(activityfeedRepo)
+	activityfeedHandler := activityfeedmodule.NewHandler(activityfeedSvc, requireBoardAuth)
+	activityfeedHandler.RegisterRoutes(app)
+	attentionRepo := attentionmodule.NewRepository(db)
+	attentionSvc := attentionmodule.NewService(attentionRepo)
+	attentionHandler := attentionmodule.NewHandler(attentionSvc, requireBoardAuth)
+	attentionHandler.RegisterRoutes(app)
+	boardhealthRepo := boardhealthmodule.NewRepository(db)
+	boardhealthSvc := boardhealthmodule.NewService(boardhealthRepo)
+	boardhealthHandler := boardhealthmodule.NewHandler(boardhealthSvc, requireBoardAuth)
+	boardhealthHandler.RegisterRoutes(app)
+	homeSvc := homemodule.NewService(activityfeedSvc, attentionSvc, boardhealthSvc, boardStatsSvc, rdb)
+	homeHandler := homemodule.NewHandler(homeSvc)
+	homeHandler.RegisterRoutes(app)
 
 	docsRepo := docsmodule.NewRepository(db)
 	docsSvc := docsmodule.NewService(docsRepo, updateDocEmbedding, func(text string) (string, error) {
@@ -544,18 +630,18 @@ func main() {
 			return "", err
 		}
 		return pgvector(emb), nil
-	})
-	docsHandler := docsmodule.NewHandler(docsSvc)
+	}, boardStatsSvc)
+	docsHandler := docsmodule.NewHandler(docsSvc, requireBoardAuth, requireBoardFromQuery, requireDocAuth)
 	docsHandler.RegisterRoutes(app)
 
 	commentsRepo := commentsmodule.NewRepository(db)
 	commentsSvc := commentsmodule.NewService(commentsRepo)
-	commentsHandler := commentsmodule.NewHandler(commentsSvc)
+	commentsHandler := commentsmodule.NewHandler(commentsSvc, requireTaskAuth)
 	commentsHandler.RegisterRoutes(app)
 
 	deliverablesRepo := deliverablesmodule.NewRepository(db)
 	deliverablesSvc := deliverablesmodule.NewService(deliverablesRepo, logActivity)
-	deliverablesHandler := deliverablesmodule.NewHandler(deliverablesSvc)
+	deliverablesHandler := deliverablesmodule.NewHandler(deliverablesSvc, requireTaskAuth)
 	deliverablesHandler.RegisterRoutes(app)
 
 	tasksRepo := tasksmodule.NewRepository(db)
@@ -578,17 +664,18 @@ func main() {
 			}
 			return pgvector(emb), nil
 		},
+		BoardStats: boardStatsSvc,
 	})
-	tasksHandler := tasksmodule.NewHandler(tasksSvc)
+	tasksHandler := tasksmodule.NewHandler(tasksSvc, docsSvc, requireBoardAuth, requireBoardFromBody, requireBoardFromQuery, requireTaskAuth)
 	tasksHandler.RegisterRoutes(app)
 
 	agentsRepo := agentsmodule.NewRepository(db)
-	agentsSvc := agentsmodule.NewService(agentsRepo, generateMachineToken, hashToken)
-	agentsHandler := agentsmodule.NewHandler(agentsSvc)
+	agentsSvc := agentsmodule.NewService(agentsRepo, generateMachineToken, hashToken, boardStatsSvc)
+	agentsHandler := agentsmodule.NewHandler(agentsSvc, requireBoardAuth)
 	agentsHandler.RegisterRoutes(app)
 
 	runtimeRepo := runtimemodule.NewRepository(db)
-	runtimeSvc := runtimemodule.NewService(runtimeRepo, hashToken, signWebhookPayload, agentInfraSvc, logActivity, broadcastUpdate)
+	runtimeSvc := runtimemodule.NewService(runtimeRepo, hashToken, signWebhookPayload, agentInfraSvc, logActivity, broadcastUpdate, boardStatsSvc)
 	runtimeHandler := runtimemodule.NewHandler(runtimeSvc)
 	runtimeHandler.RegisterRoutes(app)
 
@@ -602,7 +689,7 @@ func main() {
 	clawnHandler := clawnmodule.NewHandler(clawnSvc)
 	clawnHandler.RegisterRoutes(app)
 
-	taskRunsHandler := taskrunsmodule.NewHandler(db)
+	taskRunsHandler := taskrunsmodule.NewHandler(db, requireTaskAuth)
 	taskRunsHandler.RegisterRoutes(app)
 
 	authProxyHandler := authproxymodule.NewHandler()

@@ -152,7 +152,7 @@ export function RegisterAgentModal({ boardId, isOpen, onClose, onSuccess }: Regi
     if (engine === 'rest') {
       return 'REST/Polling bisa didaftarkan dulu. Endpoint ini opsional untuk metadata awal.';
     }
-    return 'MoziBoard akan push event assignment ke webhook ini.';
+    return 'ClawnBoard akan push event assignment ke webhook ini.';
   }, [provider, engine]);
 
   const filteredClawnProjects = useMemo(() => {
@@ -563,7 +563,7 @@ export function RegisterAgentModal({ boardId, isOpen, onClose, onSuccess }: Regi
                 <div className="text-lg font-semibold">Agent connected successfully</div>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                Simpan machine token ini kalau runtime agent perlu call balik ke MoziBoard runtime APIs.
+                Simpan machine token ini kalau runtime agent perlu call balik ke ClawnBoard runtime APIs.
               </p>
               <div className="mt-4 rounded-xl border bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
                 <div className="mb-2 text-xs uppercase tracking-wide text-muted-foreground">Agent ID</div>

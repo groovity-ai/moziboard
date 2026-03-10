@@ -2,20 +2,32 @@ package tasks
 
 import (
 	"strconv"
+	"strings"
+
+	docsmodule "moziboard-backend/internal/modules/docs"
 
 	"github.com/gofiber/fiber/v2"
 )
 
-type Handler struct{ svc *Service }
+type Handler struct {
+	svc                   *Service
+	docsSvc               *docsmodule.Service
+	requireBoardAuth      fiber.Handler
+	requireBoardFromBody  fiber.Handler
+	requireBoardFromQuery fiber.Handler
+	requireTaskAuth       fiber.Handler
+}
 
-func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
+func NewHandler(svc *Service, docsSvc *docsmodule.Service, requireBoardAuth fiber.Handler, requireBoardFromBody fiber.Handler, requireBoardFromQuery fiber.Handler, requireTaskAuth fiber.Handler) *Handler {
+	return &Handler{svc: svc, docsSvc: docsSvc, requireBoardAuth: requireBoardAuth, requireBoardFromBody: requireBoardFromBody, requireBoardFromQuery: requireBoardFromQuery, requireTaskAuth: requireTaskAuth}
+}
 
 func (h *Handler) RegisterRoutes(app fiber.Router) {
-	app.Get("/api/boards/:id/tasks", h.GetBoardTasks)
-	app.Post("/api/tasks", h.CreateTask)
-	app.Put("/api/tasks/:id", h.UpdateTask)
-	app.Get("/api/tasks/:id/activities", h.GetTaskActivities)
-	app.Get("/api/search", h.SearchTasks)
+	app.Get("/api/boards/:id/tasks", h.requireBoardAuth, h.GetBoardTasks)
+	app.Post("/api/tasks", h.requireBoardFromBody, h.CreateTask)
+	app.Put("/api/tasks/:id", h.requireTaskAuth, h.UpdateTask)
+	app.Get("/api/tasks/:id/activities", h.requireTaskAuth, h.GetTaskActivities)
+	app.Get("/api/search", h.requireBoardFromQuery, h.SearchTasks)
 }
 
 func (h *Handler) GetBoardTasks(c *fiber.Ctx) error {
@@ -32,7 +44,7 @@ func (h *Handler) CreateTask(c *fiber.Ctx) error {
 		return c.Status(400).SendString(err.Error())
 	}
 	if err := h.svc.Create(c.Context(), &t); err != nil {
-		if err.Error() == "title is required" || err.Error() == "no board found" {
+		if err.Error() == "title is required" || err.Error() == "no board found" || err.Error() == "assignee is not a board member" {
 			return c.Status(400).SendString(err.Error())
 		}
 		return c.Status(500).SendString(err.Error())
@@ -51,6 +63,9 @@ func (h *Handler) UpdateTask(c *fiber.Ctx) error {
 		if err.Error() == "no rows in result set" {
 			return c.Status(404).SendString("Task not found")
 		}
+		if err.Error() == "assignee is not a board member" {
+			return c.Status(400).SendString(err.Error())
+		}
 		return c.Status(500).SendString(err.Error())
 	}
 	return c.JSON(updated)
@@ -66,12 +81,62 @@ func (h *Handler) GetTaskActivities(c *fiber.Ctx) error {
 }
 
 func (h *Handler) SearchTasks(c *fiber.Ctx) error {
-	items, err := h.svc.Search(c.Context(), c.Query("q"))
+	boardID := c.Query("board_id")
+	query := c.Query("q")
+
+	tasks, err := h.svc.Search(c.Context(), boardID, query)
 	if err != nil {
-		if err.Error() == "query required" {
+		if err.Error() == "query required" || err.Error() == "board_id required" {
 			return c.Status(400).SendString(err.Error())
 		}
 		return c.Status(500).SendString(err.Error())
 	}
-	return c.JSON(items)
+
+	type searchResult struct {
+		ID       string      `json:"id"`
+		Type     string      `json:"type"`
+		Title    string      `json:"title"`
+		Subtitle string      `json:"subtitle,omitempty"`
+		Preview  string      `json:"preview,omitempty"`
+		Data     interface{} `json:"data"`
+	}
+
+	results := make([]searchResult, 0, len(tasks)+5)
+	for _, task := range tasks {
+		preview := strings.TrimSpace(task.Description)
+		if len(preview) > 160 {
+			preview = preview[:160] + "…"
+		}
+		results = append(results, searchResult{
+			ID:       strconv.Itoa(task.ID),
+			Type:     "task",
+			Title:    task.Title,
+			Subtitle: task.Status,
+			Preview:  preview,
+			Data:     task,
+		})
+	}
+
+	if h.docsSvc != nil {
+		docs, err := h.docsSvc.Search(c.Context(), boardID, query)
+		if err != nil && err.Error() != "query required" {
+			return c.Status(500).SendString(err.Error())
+		}
+		for _, doc := range docs {
+			preview := strings.TrimSpace(doc.Content)
+			if len(preview) > 160 {
+				preview = preview[:160] + "…"
+			}
+			results = append(results, searchResult{
+				ID:       strconv.Itoa(doc.ID),
+				Type:     "doc",
+				Title:    doc.Title,
+				Subtitle: "document",
+				Preview:  preview,
+				Data:     doc,
+			})
+		}
+	}
+
+	return c.JSON(results)
 }

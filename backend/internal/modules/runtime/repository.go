@@ -109,3 +109,29 @@ func (r *Repository) TouchConnectorSuccess(ctx context.Context, connectorID int)
 	_, err := r.db.Exec(ctx, `UPDATE agent_connectors SET last_success_at=$2, status='connected', updated_at=CURRENT_TIMESTAMP WHERE id=$1`, connectorID, time.Now())
 	return err
 }
+
+func (r *Repository) GetBoardIDByTaskID(ctx context.Context, taskID int) (string, error) {
+	var boardID string
+	err := r.db.QueryRow(ctx, `SELECT board_id::text FROM tasks WHERE id=$1`, taskID).Scan(&boardID)
+	return boardID, err
+}
+
+func (r *Repository) ListBoardIDsByAgent(ctx context.Context, agentID string) ([]string, error) {
+	rows, err := r.db.Query(ctx, `SELECT board_id::text FROM board_agents WHERE agent_id=$1 AND active=true`, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var boardID string
+		if err := rows.Scan(&boardID); err != nil {
+			return nil, err
+		}
+		items = append(items, boardID)
+	}
+	if items == nil {
+		items = []string{}
+	}
+	return items, nil
+}

@@ -2,16 +2,19 @@ package agents
 
 import "github.com/gofiber/fiber/v2"
 
-type Handler struct{ svc *Service }
+type Handler struct {
+	svc              *Service
+	requireBoardAuth fiber.Handler
+}
 
-func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
+func NewHandler(svc *Service, requireBoardAuth fiber.Handler) *Handler { return &Handler{svc: svc, requireBoardAuth: requireBoardAuth} }
 
 func (h *Handler) RegisterRoutes(app fiber.Router) {
 	app.Get("/api/agents", h.GetAgents)
 	app.Get("/api/agents/:id", h.GetAgentProfile)
 	app.Post("/api/agents/register", h.RegisterAgent)
 	app.Post("/api/agents/:id/connect-board", h.ConnectAgentToBoard)
-	app.Get("/api/boards/:id/agents", h.GetBoardAgents)
+	app.Get("/api/boards/:id/agents", h.requireBoardAuth, h.GetBoardAgents)
 	app.Get("/api/agents/:id/runs", h.GetAgentRuns)
 	app.Get("/api/agents/:id/notifications", h.GetAgentNotifications)
 	app.Post("/api/agents/:id/heartbeat", h.HeartbeatAgent)

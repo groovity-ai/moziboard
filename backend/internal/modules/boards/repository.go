@@ -14,8 +14,17 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db}
 }
 
-func (r *Repository) ListBoards(ctx context.Context) ([]Board, error) {
-	rows, err := r.db.Query(ctx, "SELECT id::text, user_id, title, description FROM boards ORDER BY created_at DESC")
+func (r *Repository) ListBoards(ctx context.Context, userID string) ([]Board, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT b.id::text, b.user_id, b.title, b.description
+		FROM boards b
+		WHERE COALESCE(b.user_id, '') = $1
+		   OR EXISTS (
+			   SELECT 1 FROM board_members bm
+			   WHERE bm.board_id = b.id AND bm.member_id = $1
+		   )
+		ORDER BY b.created_at DESC
+	`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -28,6 +37,9 @@ func (r *Repository) ListBoards(ctx context.Context) ([]Board, error) {
 			return nil, err
 		}
 		boards = append(boards, b)
+	}
+	if boards == nil {
+		boards = []Board{}
 	}
 	return boards, nil
 }

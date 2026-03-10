@@ -7,16 +7,17 @@ import (
 )
 
 type Handler struct {
-	svc *Service
+	svc             *Service
+	requireTaskAuth fiber.Handler
 }
 
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc *Service, requireTaskAuth fiber.Handler) *Handler {
+	return &Handler{svc: svc, requireTaskAuth: requireTaskAuth}
 }
 
 func (h *Handler) RegisterRoutes(app fiber.Router) {
-	app.Get("/api/tasks/:id/comments", h.GetTaskComments)
-	app.Post("/api/tasks/:id/comments", h.CreateComment)
+	app.Get("/api/tasks/:id/comments", h.requireTaskAuth, h.GetTaskComments)
+	app.Post("/api/tasks/:id/comments", h.requireTaskAuth, h.CreateComment)
 }
 
 func (h *Handler) GetTaskComments(c *fiber.Ctx) error {

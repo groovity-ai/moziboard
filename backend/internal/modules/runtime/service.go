@@ -23,6 +23,10 @@ type AgentInfra interface {
 type LogActivityFunc func(taskID int, userID, action, details string)
 type BroadcastFunc func(msg string)
 
+type BoardStatsUpdater interface {
+	RecomputeBoard(ctx context.Context, boardID string) error
+}
+
 type Service struct {
 	repo               *Repository
 	hashToken          HashTokenFunc
@@ -30,10 +34,11 @@ type Service struct {
 	agentInfra         AgentInfra
 	logActivity        LogActivityFunc
 	broadcast          BroadcastFunc
+	boardStats         BoardStatsUpdater
 }
 
-func NewService(repo *Repository, hashToken HashTokenFunc, signWebhookPayload SignPayloadFunc, agentInfra AgentInfra, logActivity LogActivityFunc, broadcast BroadcastFunc) *Service {
-	return &Service{repo: repo, hashToken: hashToken, signWebhookPayload: signWebhookPayload, agentInfra: agentInfra, logActivity: logActivity, broadcast: broadcast}
+func NewService(repo *Repository, hashToken HashTokenFunc, signWebhookPayload SignPayloadFunc, agentInfra AgentInfra, logActivity LogActivityFunc, broadcast BroadcastFunc, boardStats BoardStatsUpdater) *Service {
+	return &Service{repo: repo, hashToken: hashToken, signWebhookPayload: signWebhookPayload, agentInfra: agentInfra, logActivity: logActivity, broadcast: broadcast, boardStats: boardStats}
 }
 
 func extractBearerToken(c *fiber.Ctx) string {
@@ -150,7 +155,18 @@ func (s *Service) RuntimeHeartbeat(ctx context.Context, conn *agentsmodule.Agent
 	if req.Status == "" {
 		req.Status = "online"
 	}
-	return s.repo.UpdateRuntimeHeartbeat(ctx, conn.ID, conn.AgentID, req.Status, req.CurrentActivity, req.CurrentTaskID)
+	if err := s.repo.UpdateRuntimeHeartbeat(ctx, conn.ID, conn.AgentID, req.Status, req.CurrentActivity, req.CurrentTaskID); err != nil {
+		return err
+	}
+	if s.boardStats != nil {
+		boardIDs, err := s.repo.ListBoardIDsByAgent(ctx, conn.AgentID)
+		if err == nil {
+			for _, boardID := range boardIDs {
+				go s.boardStats.RecomputeBoard(context.Background(), boardID)
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Service) RuntimeTaskAck(ctx context.Context, conn *agentsmodule.AgentConnector, req TaskAckReq) (int, error) {
@@ -173,6 +189,11 @@ func (s *Service) RuntimeTaskAck(ctx context.Context, conn *agentsmodule.AgentCo
 	}
 	if s.broadcast != nil {
 		go s.broadcast("UPDATE")
+	}
+	if s.boardStats != nil {
+		if boardID, err := s.repo.GetBoardIDByTaskID(ctx, req.TaskID); err == nil {
+			go s.boardStats.RecomputeBoard(context.Background(), boardID)
+		}
 	}
 	return runID, nil
 }
@@ -206,6 +227,11 @@ func (s *Service) RuntimeTaskUpdate(ctx context.Context, conn *agentsmodule.Agen
 	if s.broadcast != nil {
 		go s.broadcast("UPDATE")
 	}
+	if s.boardStats != nil {
+		if boardID, err := s.repo.GetBoardIDByTaskID(ctx, req.TaskID); err == nil {
+			go s.boardStats.RecomputeBoard(context.Background(), boardID)
+		}
+	}
 	return runID, nil
 }
 
@@ -221,6 +247,11 @@ func (s *Service) RuntimeTaskComment(ctx context.Context, conn *agentsmodule.Age
 	}
 	if s.broadcast != nil {
 		go s.broadcast("UPDATE")
+	}
+	if s.boardStats != nil {
+		if boardID, err := s.repo.GetBoardIDByTaskID(ctx, req.TaskID); err == nil {
+			go s.boardStats.RecomputeBoard(context.Background(), boardID)
+		}
 	}
 	return nil
 }
@@ -240,6 +271,11 @@ func (s *Service) RuntimeTaskDeliverable(ctx context.Context, conn *agentsmodule
 	if s.broadcast != nil {
 		go s.broadcast("UPDATE")
 	}
+	if s.boardStats != nil {
+		if boardID, err := s.repo.GetBoardIDByTaskID(ctx, req.TaskID); err == nil {
+			go s.boardStats.RecomputeBoard(context.Background(), boardID)
+		}
+	}
 	return runID, nil
 }
 
@@ -258,6 +294,11 @@ func (s *Service) RuntimeTaskReviewRequest(ctx context.Context, conn *agentsmodu
 	}
 	if s.broadcast != nil {
 		go s.broadcast("UPDATE")
+	}
+	if s.boardStats != nil {
+		if boardID, err := s.repo.GetBoardIDByTaskID(ctx, req.TaskID); err == nil {
+			go s.boardStats.RecomputeBoard(context.Background(), boardID)
+		}
 	}
 	return runID, nil
 }

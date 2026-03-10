@@ -3,7 +3,7 @@ import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { Task } from './Board';
 import clsx from 'clsx';
-import { AlertTriangle, GripVertical, MessageCircle, PackageCheck, User } from 'lucide-react';
+import { AlertTriangle, GripVertical, User, Hash } from 'lucide-react';
 import useSWR from 'swr';
 
 interface TaskCardProps {
@@ -11,9 +11,6 @@ interface TaskCardProps {
   onClick?: () => void;
   dragOnly?: boolean;
 }
-
-interface CommentItem { id: number }
-interface DeliverableItem { id: number }
 
 const fetcher = (url: string) => fetch(url).then((res) => res.json());
 
@@ -36,8 +33,6 @@ export function TaskCard({ task, onClick, dragOnly = false }: TaskCardProps) {
   });
 
   const { data: members } = useSWR(task.board_id ? `/api/boards/${task.board_id}/members` : null, fetcher);
-  const { data: comments } = useSWR<CommentItem[]>(task.id ? `/api/tasks/${task.id}/comments` : null, fetcher);
-  const { data: deliverables } = useSWR<DeliverableItem[]>(task.id ? `/api/tasks/${task.id}/deliverables` : null, fetcher);
   const assignee = members?.find((m: any) => m.id === task.assignee_id);
 
   const style = {
@@ -66,11 +61,11 @@ export function TaskCard({ task, onClick, dragOnly = false }: TaskCardProps) {
       style={style}
       {...attributes}
       className={clsx(
-        'group relative flex min-h-[120px] h-fit cursor-pointer flex-col justify-start rounded-xl border border-zinc-200 bg-white p-4 pb-10 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md hover:ring-2 hover:ring-inset hover:ring-rose-500 dark:border-zinc-700 dark:bg-zinc-800 dark:shadow-md'
+        'group relative flex min-h-[132px] h-fit cursor-pointer flex-col justify-start rounded-xl border border-zinc-200 bg-white p-4 pb-14 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md hover:ring-2 hover:ring-inset hover:ring-rose-500 dark:border-zinc-700 dark:bg-zinc-800 dark:shadow-md'
       )}
     >
-      <button type="button" onClick={onClick} className="flex w-full flex-col justify-start pr-8 text-left">
-        <div className="mb-2 flex items-center gap-2">
+      <button type="button" onClick={onClick} className="flex w-full flex-1 flex-col justify-start text-left">
+        <div className="mb-2 flex flex-wrap items-center gap-2 pr-8">
           <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${statusTone(task)}`}>
             {task.status || task.list_id}
           </span>
@@ -79,39 +74,34 @@ export function TaskCard({ task, onClick, dragOnly = false }: TaskCardProps) {
               <AlertTriangle size={10} /> blocked
             </span>
           )}
+          <span className="inline-flex items-center gap-1 rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-700/70 dark:text-zinc-300">
+            <Hash size={10} /> {task.id}
+          </span>
         </div>
 
         <h3 className="line-clamp-3 text-sm font-semibold leading-tight">{task.title}</h3>
         {summary && (
-          <p className="mt-1.5 line-clamp-2 text-xs text-gray-500 dark:text-gray-400">
+          <p className="mt-1.5 line-clamp-2 pr-2 text-xs text-gray-500 dark:text-gray-400">
             {summary}
           </p>
         )}
 
-        <div className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-gray-500 dark:text-gray-400">
-          {assignee && (
-            <span className="inline-flex items-center gap-1">
-              <User size={12} /> {assignee.name}
-            </span>
-          )}
-          {!!comments?.length && (
-            <span className="inline-flex items-center gap-1">
-              <MessageCircle size={12} /> {comments.length}
-            </span>
-          )}
-          {!!deliverables?.length && (
-            <span className="inline-flex items-center gap-1">
-              <PackageCheck size={12} /> {deliverables.length}
-            </span>
-          )}
-        </div>
       </button>
 
-      {assignee && (
-        <div className="absolute bottom-2 right-2 flex h-6 w-6 items-center justify-center rounded-full bg-gray-100 text-xs shadow-sm ring-1 ring-white dark:bg-zinc-700 dark:ring-zinc-800" title={assignee.name}>
-          {assignee.avatar}
+      <div className="absolute inset-x-4 bottom-3 flex items-center justify-between gap-2">
+        <div className="min-w-0 pr-2 text-[11px] text-gray-500 dark:text-gray-400">
+          <span className="inline-flex max-w-full items-center gap-1 rounded-full bg-zinc-100 px-2 py-1 dark:bg-zinc-700/60">
+            <User size={12} className="shrink-0" />
+            <span className="truncate">{assignee ? assignee.name : 'Unassigned'}</span>
+          </span>
         </div>
-      )}
+
+        {assignee ? (
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gray-100 text-xs shadow-sm ring-1 ring-white dark:bg-zinc-700 dark:ring-zinc-800" title={assignee.name}>
+            {assignee.avatar}
+          </div>
+        ) : <div className="h-7 w-7 shrink-0" />}
+      </div>
 
       <button
         type="button"

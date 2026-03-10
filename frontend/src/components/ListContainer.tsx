@@ -14,13 +14,13 @@ interface ListContainerProps {
   isActiveDropTarget?: boolean;
 }
 
-const listSemantics: Record<string, { icon: React.ComponentType<any>; tone: string; badge: string }> = {
-  backlog: { icon: Inbox, tone: 'text-zinc-500', badge: 'bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300' },
-  todo: { icon: CircleDot, tone: 'text-sky-500', badge: 'bg-sky-100 text-sky-700 dark:bg-sky-900/20 dark:text-sky-300' },
-  doing: { icon: Play, tone: 'text-blue-500', badge: 'bg-blue-100 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300' },
-  qa: { icon: Eye, tone: 'text-amber-500', badge: 'bg-amber-100 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300' },
-  done: { icon: CheckCircle2, tone: 'text-green-500', badge: 'bg-green-100 text-green-700 dark:bg-green-900/20 dark:text-green-300' },
-  blocked: { icon: AlertTriangle, tone: 'text-red-500', badge: 'bg-red-100 text-red-700 dark:bg-red-900/20 dark:text-red-300' },
+const listSemantics: Record<string, { icon: React.ComponentType<any>; tone: string; badge: string; shell: string; emptyTitle: string; emptyHint: string }> = {
+  backlog: { icon: Inbox, tone: 'text-zinc-500', badge: 'bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300', shell: 'from-zinc-100/90 to-white dark:from-zinc-900 dark:to-zinc-950', emptyTitle: 'Nothing in backlog', emptyHint: 'Capture ideas, raw requests, or not-yet-shaped work here.' },
+  todo: { icon: CircleDot, tone: 'text-sky-500', badge: 'bg-sky-100 text-sky-700 dark:bg-sky-900/20 dark:text-sky-300', shell: 'from-sky-50 to-white dark:from-sky-950/20 dark:to-zinc-950', emptyTitle: 'Ready for pickup', emptyHint: 'Drop tasks here when they are clear enough to start.' },
+  doing: { icon: Play, tone: 'text-blue-500', badge: 'bg-blue-100 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300', shell: 'from-blue-50 to-white dark:from-blue-950/20 dark:to-zinc-950', emptyTitle: 'No work in progress', emptyHint: 'Move active execution here so the board reflects real momentum.' },
+  qa: { icon: Eye, tone: 'text-amber-500', badge: 'bg-amber-100 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300', shell: 'from-amber-50 to-white dark:from-amber-950/20 dark:to-zinc-950', emptyTitle: 'Nothing under review', emptyHint: 'Use this lane for validation, checks, and review-ready tasks.' },
+  done: { icon: CheckCircle2, tone: 'text-green-500', badge: 'bg-green-100 text-green-700 dark:bg-green-900/20 dark:text-green-300', shell: 'from-green-50 to-white dark:from-green-950/20 dark:to-zinc-950', emptyTitle: 'No completed work yet', emptyHint: 'Finished tasks will collect here as proof of progress.' },
+  blocked: { icon: AlertTriangle, tone: 'text-red-500', badge: 'bg-red-100 text-red-700 dark:bg-red-900/20 dark:text-red-300', shell: 'from-red-50 to-white dark:from-red-950/20 dark:to-zinc-950', emptyTitle: 'No blockers right now', emptyHint: 'If something is stuck, surface it here with a clear reason.' },
 };
 
 export function ListContainer({ list, boardId, onTaskClick, isActiveDropTarget = false }: ListContainerProps) {
@@ -54,13 +54,13 @@ export function ListContainer({ list, boardId, onTaskClick, isActiveDropTarget =
     <div
       ref={setNodeRef}
       className={clsx(
-        'flex h-fit w-[350px] shrink-0 flex-col gap-4 rounded-2xl border bg-gray-100 p-4 shadow-sm transition-all dark:bg-zinc-900',
+        `flex h-full min-h-0 w-[350px] shrink-0 flex-col gap-4 rounded-2xl border bg-gradient-to-b p-4 shadow-sm transition-all dark:bg-zinc-900 ${semantic.shell}`,
         (isOver || isActiveDropTarget)
-          ? 'border-rose-400 ring-2 ring-rose-200 dark:border-rose-500 dark:ring-rose-900/30'
+          ? 'border-rose-400 ring-2 ring-rose-200 shadow-rose-100/70 dark:border-rose-500 dark:ring-rose-900/30'
           : 'border-transparent'
       )}
     >
-      <div className="sticky top-0 z-10 flex items-center justify-between rounded-xl bg-white/70 px-2 py-2 backdrop-blur dark:bg-zinc-950/40">
+      <div className="sticky top-0 z-10 flex items-center justify-between rounded-xl bg-white/80 px-2 py-2 backdrop-blur dark:bg-zinc-950/60">
         <div className="flex items-center gap-2">
           <Icon size={16} className={semantic.tone} />
           <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${semantic.badge}`}>{list.title}</span>
@@ -70,17 +70,17 @@ export function ListContainer({ list, boardId, onTaskClick, isActiveDropTarget =
         </span>
       </div>
 
-      <div className="flex min-h-[120px] flex-col gap-2">
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
         <SortableContext items={list.tasks.map((t) => t.id)} strategy={verticalListSortingStrategy}>
           {list.tasks.map((task) => (
             <TaskCard key={task.id} task={task} onClick={() => onTaskClick?.(task)} />
           ))}
         </SortableContext>
         {list.tasks.length === 0 && (
-          <div className="flex min-h-[120px] flex-col items-center justify-center rounded-xl border border-dashed border-gray-300 bg-white/60 text-sm text-gray-400 dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-500">
+          <div className="flex min-h-[140px] flex-col items-center justify-center rounded-xl border border-dashed border-gray-300 bg-white/70 px-5 text-center text-sm text-gray-500 dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-500">
             <Icon size={18} className="mb-2 opacity-60" />
-            <div className="font-medium">Empty</div>
-            <div className="mt-1 text-xs">Drop task here or create a new one</div>
+            <div className="font-medium">{semantic.emptyTitle}</div>
+            <div className="mt-1 max-w-[220px] text-xs leading-relaxed">{semantic.emptyHint}</div>
           </div>
         )}
       </div>

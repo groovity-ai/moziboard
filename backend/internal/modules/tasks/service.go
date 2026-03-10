@@ -40,12 +40,17 @@ func (f AgentStateUpdaterFuncs) MarkBlocked(blockedReason string, agentID string
 	}
 }
 
+type BoardStatsUpdater interface {
+	RecomputeBoard(ctx context.Context, boardID string) error
+}
+
 type SideEffects struct {
 	AgentInfra        AgentInfra
 	LogActivity       LogActivityFunc
 	Broadcast         BroadcastFunc
 	AgentStateUpdater AgentStateUpdater
 	Embedder          Embedder
+	BoardStats        BoardStatsUpdater
 }
 
 type Service struct {
@@ -65,9 +70,14 @@ func (s *Service) ListActivities(ctx context.Context, taskID int) ([]Activity, e
 	return s.repo.ListActivities(ctx, taskID)
 }
 
-func (s *Service) Search(ctx context.Context, query string) ([]Task, error) {
-	if strings.TrimSpace(query) == "" {
+func (s *Service) Search(ctx context.Context, boardID string, query string) ([]Task, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
 		return nil, errors.New("query required")
+	}
+	boardID = strings.TrimSpace(boardID)
+	if boardID == "" {
+		return nil, errors.New("board_id required")
 	}
 	if s.sideEffects.Embedder == nil {
 		return nil, errors.New("embedder not configured")
@@ -76,7 +86,7 @@ func (s *Service) Search(ctx context.Context, query string) ([]Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.repo.SearchByEmbedding(ctx, embedding)
+	return s.repo.Search(ctx, boardID, query, embedding)
 }
 
 func (s *Service) Create(ctx context.Context, t *Task) error {
@@ -96,6 +106,21 @@ func (s *Service) Create(ctx context.Context, t *Task) error {
 	}
 	t.Status = NormalizeTaskStatus(t.ListID)
 	t.ListID = StatusToListID(t.Status)
+	if t.Position <= 0 {
+		next, err := s.repo.NextPosition(ctx, t.BoardID, t.ListID)
+		if err == nil {
+			t.Position = next
+		}
+	}
+	if t.AssigneeID != nil && strings.TrimSpace(*t.AssigneeID) != "" {
+		ok, err := s.repo.IsBoardMember(ctx, t.BoardID, strings.TrimSpace(*t.AssigneeID))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("assignee is not a board member")
+		}
+	}
 	if err := s.repo.Create(ctx, t); err != nil {
 		return err
 	}
@@ -118,6 +143,9 @@ func (s *Service) Create(ctx context.Context, t *Task) error {
 	go s.updateSearchEmbedding(t.ID, t.Title+" "+t.Description)
 	if s.sideEffects.Broadcast != nil {
 		go s.sideEffects.Broadcast("UPDATE")
+	}
+	if s.sideEffects.BoardStats != nil {
+		go s.sideEffects.BoardStats.RecomputeBoard(context.Background(), t.BoardID)
 	}
 	return nil
 }
@@ -143,6 +171,15 @@ func (s *Service) Update(ctx context.Context, id int, patch *Task) (Task, error)
 	if newTask.AssigneeID == nil {
 		newTask.AssigneeID = oldTask.AssigneeID
 	}
+	if newTask.AssigneeID != nil && strings.TrimSpace(*newTask.AssigneeID) != "" {
+		ok, err := s.repo.IsBoardMember(ctx, newTask.BoardID, strings.TrimSpace(*newTask.AssigneeID))
+		if err != nil {
+			return Task{}, err
+		}
+		if !ok {
+			return Task{}, errors.New("assignee is not a board member")
+		}
+	}
 	if newTask.ParentID == nil {
 		newTask.ParentID = oldTask.ParentID
 	}
@@ -150,6 +187,12 @@ func (s *Service) Update(ctx context.Context, id int, patch *Task) (Task, error)
 		newTask.Status = NormalizeTaskStatus(newTask.ListID)
 	}
 	newTask.ListID = StatusToListID(newTask.Status)
+	if newTask.Position <= 0 {
+		next, err := s.repo.NextPosition(ctx, newTask.BoardID, newTask.ListID)
+		if err == nil {
+			newTask.Position = next
+		}
+	}
 	if newTask.Status == "blocked" && newTask.BlockedReason == "" {
 		newTask.BlockedReason = oldTask.BlockedReason
 	}
@@ -211,6 +254,12 @@ func (s *Service) Update(ctx context.Context, id int, patch *Task) (Task, error)
 	go s.updateSearchEmbedding(id, newTask.Title+" "+newTask.Description)
 	if s.sideEffects.Broadcast != nil {
 		go s.sideEffects.Broadcast("UPDATE")
+	}
+	if s.sideEffects.BoardStats != nil {
+		go s.sideEffects.BoardStats.RecomputeBoard(context.Background(), oldTask.BoardID)
+		if newTask.BoardID != oldTask.BoardID {
+			go s.sideEffects.BoardStats.RecomputeBoard(context.Background(), newTask.BoardID)
+		}
 	}
 	freshTask, err := s.repo.GetByID(ctx, id)
 	if err != nil {

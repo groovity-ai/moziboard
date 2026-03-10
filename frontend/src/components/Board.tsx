@@ -10,6 +10,7 @@ import {
   useSensors,
   DragStartEvent,
   DragEndEvent,
+  DragOverEvent,
 } from '@dnd-kit/core';
 import {
   sortableKeyboardCoordinates,
@@ -49,6 +50,8 @@ const defaultLists = [
 
 interface BoardProps {
   boardId: string;
+  externalTask?: Task | null;
+  onTaskHandled?: () => void;
 }
 
 function buildListsFromTasks(tasks: Task[] | undefined): ListType[] {
@@ -141,7 +144,7 @@ function moveTaskInLists(lists: ListType[], activeId: string, overId: string): {
   };
 }
 
-export function Board({ boardId }: BoardProps) {
+export function Board({ boardId, externalTask, onTaskHandled }: BoardProps) {
   const { data: tasks } = useSWR<Task[]>(`/api/boards/${boardId}/tasks`, fetcher, {
     revalidateOnFocus: false,
     refreshInterval: 0,
@@ -151,6 +154,15 @@ export function Board({ boardId }: BoardProps) {
   const [activeTask, setActiveTask] = useState<Task | null>(null);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [activeListId, setActiveListId] = useState<string | null>(null);
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+
+  useEffect(() => {
+    if (externalTask) {
+      setSelectedTask(externalTask);
+      onTaskHandled?.();
+    }
+  }, [externalTask, onTaskHandled]);
 
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -212,6 +224,22 @@ export function Board({ boardId }: BoardProps) {
     if (task) {
       setActiveTask(task);
       setActiveListId(task.list_id);
+      setSaveState('idle');
+    }
+  };
+
+  const handleDragOver = (event: DragOverEvent) => {
+    const { active, over } = event;
+    if (!over) return;
+
+    const activeId = String(active.id);
+    const overId = String(over.id);
+    if (activeId === overId) return;
+
+    const { nextLists } = moveTaskInLists(lists, activeId, overId);
+    if (nextLists !== lists) {
+      setLists(nextLists);
+      setActiveListId(findListIdForDrop(nextLists, overId));
     }
   };
 
@@ -231,13 +259,17 @@ export function Board({ boardId }: BoardProps) {
     const optimisticTasks = nextLists.flatMap((list) => list.tasks);
     const snapshotLists = lists;
     setLists(nextLists);
+    setSaveState('saving');
 
     mutate(`/api/boards/${boardId}/tasks`, optimisticTasks, false);
 
     try {
       await Promise.all(changedTasks.map((task) => persistTask(task)));
+      setLastSavedAt(Date.now());
+      setSaveState('saved');
       mutate(`/api/boards/${boardId}/tasks`);
     } catch (error) {
+      setSaveState('error');
       setLists(snapshotLists);
       mutate(`/api/boards/${boardId}/tasks`);
     }
@@ -248,14 +280,20 @@ export function Board({ boardId }: BoardProps) {
       sensors={sensors}
       collisionDetection={closestCorners}
       onDragStart={handleDragStart}
+      onDragOver={handleDragOver}
       onDragEnd={handleDragEnd}
     >
       <div className="flex h-full w-full flex-col p-4">
-        <div className="mb-4 flex w-full justify-center">
-          <SearchBar onTaskSelect={(task) => setSelectedTask(task)} />
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground/60">
+            {saveState === 'saving' && <span className="flex items-center gap-1.5"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-rose-500" /> Syncing…</span>}
+            {saveState === 'saved' && <span>Board Synced · {lastSavedAt ? new Date(lastSavedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</span>}
+            {saveState === 'error' && <span className="text-rose-500">Sync Error</span>}
+            {saveState === 'idle' && <span>Board Operational</span>}
+          </div>
         </div>
 
-        <div className="flex h-full w-full gap-4 overflow-x-auto">
+        <div className="flex h-full w-full gap-4 overflow-x-auto pb-2">
           {lists.map((list) => (
             <ListContainer
               key={list.id}

@@ -92,7 +92,7 @@ export default function LoginPage() {
                         <div className="space-y-2">
                             <CardTitle className="text-3xl font-bold tracking-tight">Welcome Back</CardTitle>
                             <CardDescription className="text-muted-foreground text-sm">
-                                Enter your AiAgenz credentials to access your autonomous workspace.
+                                Enter your AiAgenz credentials to access ClawnBoard.
                             </CardDescription>
                         </div>
                     </CardHeader>
@@ -144,7 +144,7 @@ export default function LoginPage() {
                         <div className="text-sm text-center text-muted-foreground">
                             Don't have an account?{" "}
                             <Link href="https://aiagenz.id/register" className="font-semibold text-primary hover:underline">
-                                Create an AiAgenz account
+                                Create a ClawnBoard account
                             </Link>
                         </div>
                     </CardFooter>

@@ -15,8 +15,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "MoziBoard - AI-Powered Project Management",
-  description: "Collaborative kanban board with AI agents and real-time updates",
+  title: "ClawnBoard - AI-Powered Mission Control",
+  description: "Collaborative mission control workspace with AI agents and real-time updates",
 };
 
 export default function RootLayout({

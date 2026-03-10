@@ -9,12 +9,17 @@ import (
 	agentsmodule "moziboard-backend/internal/modules/agents"
 )
 
-type Handler struct{ db *pgxpool.Pool }
+type Handler struct {
+	db              *pgxpool.Pool
+	requireTaskAuth fiber.Handler
+}
 
-func NewHandler(db *pgxpool.Pool) *Handler { return &Handler{db: db} }
+func NewHandler(db *pgxpool.Pool, requireTaskAuth fiber.Handler) *Handler {
+	return &Handler{db: db, requireTaskAuth: requireTaskAuth}
+}
 
 func (h *Handler) RegisterRoutes(app fiber.Router) {
-	app.Get("/api/tasks/:id/runs", h.GetTaskRuns)
+	app.Get("/api/tasks/:id/runs", h.requireTaskAuth, h.GetTaskRuns)
 }
 
 type agentRun = agentsmodule.AgentRun

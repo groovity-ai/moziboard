@@ -2,8 +2,11 @@ package authproxy
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -31,9 +34,6 @@ func (h *Handler) ProxyAuthLogin(c *fiber.Ctx) error {
 		return c.Status(502).JSON(fiber.Map{"error": "Failed to connect to AiAgenz backend: " + err.Error()})
 	}
 	defer resp.Body.Close()
-	for _, cookie := range resp.Header["Set-Cookie"] {
-		c.Append("Set-Cookie", cookie)
-	}
 	var data interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Failed to parse AiAgenz response"})
@@ -42,25 +42,74 @@ func (h *Handler) ProxyAuthLogin(c *fiber.Ctx) error {
 }
 
 func (h *Handler) ProxyAuthMe(c *fiber.Ctx) error {
-	authCookie := c.Get("Cookie")
-	if authCookie == "" {
-		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized: Missing authentication cookie"})
+	token := extractToken(c)
+	if token == "" {
+		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized"})
 	}
-	proxyURL := "http://172.17.0.1:4001/api/auth/me"
-	req, err := http.NewRequest("GET", proxyURL, nil)
+	claims, err := decodeJWTClaims(token)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Failed to create proxy request"})
+		return c.Status(401).JSON(fiber.Map{"error": "Invalid token"})
 	}
-	req.Header.Set("Cookie", authCookie)
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	userID := firstNonEmpty(interfaceToString(claims["sub"]), interfaceToString(claims["id"]), interfaceToString(claims["user_id"]), interfaceToString(claims["userId"]))
+	if userID == "" {
+		return c.Status(401).JSON(fiber.Map{"error": "Invalid token"})
+	}
+	return c.JSON(fiber.Map{
+		"id":    userID,
+		"email": interfaceToString(claims["email"]),
+		"role":  interfaceToString(claims["role"]),
+	})
+}
+
+func extractToken(c *fiber.Ctx) string {
+	authHeader := strings.TrimSpace(c.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+		return strings.TrimSpace(authHeader[7:])
+	}
+	cookieToken := strings.TrimSpace(c.Cookies("session_id"))
+	if cookieToken != "" {
+		return cookieToken
+	}
+	return ""
+}
+
+func decodeJWTClaims(token string) (map[string]interface{}, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return nil, fiber.ErrUnauthorized
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return c.Status(502).JSON(fiber.Map{"error": "Failed to connect to AiAgenz backend: " + err.Error()})
+		return nil, err
 	}
-	defer resp.Body.Close()
-	var data interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Failed to parse AiAgenz response"})
+	var claims map[string]interface{}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, err
 	}
-	return c.Status(resp.StatusCode).JSON(data)
+	return claims, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func interfaceToString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t)
+	case json.Number:
+		return strings.TrimSpace(t.String())
+	case float64:
+		return strings.TrimSpace(fmt.Sprintf("%.0f", t))
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", v))
+	}
 }

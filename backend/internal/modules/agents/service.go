@@ -10,14 +10,19 @@ import (
 type TokenGenerator func() (plain string, hash string, err error)
 type TokenHasher func(token string) string
 
+type BoardStatsUpdater interface {
+	RecomputeBoard(ctx context.Context, boardID string) error
+}
+
 type Service struct {
 	repo          *Repository
 	generateToken TokenGenerator
 	hashToken     TokenHasher
+	boardStats    BoardStatsUpdater
 }
 
-func NewService(repo *Repository, generateToken TokenGenerator, hashToken TokenHasher) *Service {
-	return &Service{repo: repo, generateToken: generateToken, hashToken: hashToken}
+func NewService(repo *Repository, generateToken TokenGenerator, hashToken TokenHasher, boardStats BoardStatsUpdater) *Service {
+	return &Service{repo: repo, generateToken: generateToken, hashToken: hashToken, boardStats: boardStats}
 }
 
 func (s *Service) ListAgents(ctx context.Context) ([]Agent, error) { return s.repo.ListAgents(ctx) }
@@ -41,7 +46,18 @@ func (s *Service) UpdateStatus(ctx context.Context, agentID string, req AgentSta
 	if strings.TrimSpace(req.Status) == "" {
 		req.Status = "online"
 	}
-	return s.repo.UpdateAgentStatus(ctx, agentID, req.Status, req.CurrentActivity, req.HealthNote)
+	if err := s.repo.UpdateAgentStatus(ctx, agentID, req.Status, req.CurrentActivity, req.HealthNote); err != nil {
+		return err
+	}
+	if s.boardStats != nil {
+		boardIDs, err := s.repo.ListBoardIDsByAgent(ctx, agentID)
+		if err == nil {
+			for _, boardID := range boardIDs {
+				go s.boardStats.RecomputeBoard(context.Background(), boardID)
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Service) Register(ctx context.Context, req AgentRegisterReq) (map[string]interface{}, error) {
@@ -129,5 +145,12 @@ func (s *Service) ConnectToBoard(ctx context.Context, agentID string, req AgentB
 		}
 	}
 	capBytes, _ := json.Marshal(req.Permissions)
-	return s.repo.ConnectBoard(ctx, agentID, req, autoAccept, canComment, canUpdate, canDocs, canDeliv, string(capBytes))
+	id, err := s.repo.ConnectBoard(ctx, agentID, req, autoAccept, canComment, canUpdate, canDocs, canDeliv, string(capBytes))
+	if err != nil {
+		return 0, err
+	}
+	if s.boardStats != nil {
+		go s.boardStats.RecomputeBoard(context.Background(), req.BoardID)
+	}
+	return id, nil
 }

@@ -134,3 +134,23 @@ func (r *Repository) UpdateAgentStatus(ctx context.Context, agentID, status, cur
 	_, err := r.db.Exec(ctx, "UPDATE agents SET status=$1, current_activity=$2, health_note=$3, last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$4", status, currentActivity, healthNote, agentID)
 	return err
 }
+
+func (r *Repository) ListBoardIDsByAgent(ctx context.Context, agentID string) ([]string, error) {
+	rows, err := r.db.Query(ctx, `SELECT board_id::text FROM board_agents WHERE agent_id=$1 AND active=true`, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var boardID string
+		if err := rows.Scan(&boardID); err != nil {
+			return nil, err
+		}
+		items = append(items, boardID)
+	}
+	if items == nil {
+		items = []string{}
+	}
+	return items, nil
+}

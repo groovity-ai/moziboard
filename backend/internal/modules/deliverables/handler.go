@@ -7,16 +7,17 @@ import (
 )
 
 type Handler struct {
-	svc *Service
+	svc             *Service
+	requireTaskAuth fiber.Handler
 }
 
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc *Service, requireTaskAuth fiber.Handler) *Handler {
+	return &Handler{svc: svc, requireTaskAuth: requireTaskAuth}
 }
 
 func (h *Handler) RegisterRoutes(app fiber.Router) {
-	app.Get("/api/tasks/:id/deliverables", h.GetTaskDeliverables)
-	app.Post("/api/tasks/:id/deliverables", h.CreateDeliverable)
+	app.Get("/api/tasks/:id/deliverables", h.requireTaskAuth, h.GetTaskDeliverables)
+	app.Post("/api/tasks/:id/deliverables", h.requireTaskAuth, h.CreateDeliverable)
 }
 
 func (h *Handler) GetTaskDeliverables(c *fiber.Ctx) error {

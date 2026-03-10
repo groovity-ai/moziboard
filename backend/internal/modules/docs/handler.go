@@ -7,19 +7,22 @@ import (
 )
 
 type Handler struct {
-	svc *Service
+	svc                 *Service
+	requireBoardAuth    fiber.Handler
+	requireBoardQuery   fiber.Handler
+	requireDocumentAuth fiber.Handler
 }
 
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc *Service, requireBoardAuth fiber.Handler, requireBoardQuery fiber.Handler, requireDocumentAuth fiber.Handler) *Handler {
+	return &Handler{svc: svc, requireBoardAuth: requireBoardAuth, requireBoardQuery: requireBoardQuery, requireDocumentAuth: requireDocumentAuth}
 }
 
 func (h *Handler) RegisterRoutes(app fiber.Router) {
-	app.Get("/api/boards/:id/docs", h.GetBoardDocs)
-	app.Post("/api/boards/:id/docs", h.CreateDoc)
-	app.Put("/api/docs/:id", h.UpdateDoc)
-	app.Delete("/api/docs/:id", h.DeleteDoc)
-	app.Get("/api/docs/search", h.SearchDocs)
+	app.Get("/api/boards/:id/docs", h.requireBoardAuth, h.GetBoardDocs)
+	app.Post("/api/boards/:id/docs", h.requireBoardAuth, h.CreateDoc)
+	app.Put("/api/docs/:id", h.requireDocumentAuth, h.UpdateDoc)
+	app.Delete("/api/docs/:id", h.requireDocumentAuth, h.DeleteDoc)
+	app.Get("/api/docs/search", h.requireBoardQuery, h.SearchDocs)
 }
 
 func (h *Handler) GetBoardDocs(c *fiber.Ctx) error {

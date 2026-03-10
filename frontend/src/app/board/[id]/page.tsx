@@ -1,40 +1,31 @@
 'use client';
 
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { Board } from '@/components/Board';
 import { MemberManager } from '@/components/MemberManager';
 import { useState } from 'react';
-import { Users, Layout } from 'lucide-react';
-import { SidebarTrigger } from '@/components/ui/sidebar';
+import { BoardTopbar } from '@/components/BoardTopbar';
 
 export default function BoardPage() {
   const params = useParams();
+  const router = useRouter();
   const id = params.id as string;
   const [showMembers, setShowMembers] = useState(false);
+  const [selectedTask, setSelectedTask] = useState<any>(null);
 
   return (
-    <div className="flex flex-col h-full w-full">
-      <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b px-4">
-        <div className="flex items-center gap-2">
-          <SidebarTrigger />
-          <h1 className="text-lg font-bold tracking-tight px-2 flex items-center gap-2">
-            <Layout className="w-5 h-5 text-rose-500" />
-            Kanban Board
-          </h1>
-        </div>
-        <div className="flex gap-2">
-          <button
-            onClick={() => setShowMembers(true)}
-            className="flex items-center gap-2 rounded-lg bg-gray-100 px-3 py-1.5 text-sm font-medium hover:bg-gray-200 dark:bg-zinc-800 dark:hover:bg-zinc-700"
-          >
-            <Users size={16} /> Members
-          </button>
-        </div>
-      </header>
+    <div className="flex h-full w-full flex-col">
+      <BoardTopbar
+        boardId={id}
+        section="board"
+        onMembersClick={() => setShowMembers(true)}
+        onTaskSelect={(task) => setSelectedTask(task)}
+        onDocSelect={(docId) => router.push(`/board/${id}/docs?doc=${docId}`)}
+      />
 
-      <div className="flex-1 overflow-hidden">
+      <div className="relative flex-1 overflow-hidden">
         <div className="h-full w-full overflow-hidden">
-          <Board boardId={id} />
+          <Board boardId={id} externalTask={selectedTask} onTaskHandled={() => setSelectedTask(null)} />
         </div>
       </div>
 

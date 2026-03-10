@@ -5,6 +5,7 @@ import "time"
 type Task struct {
 	ID            int     `json:"id"`
 	BoardID       string  `json:"board_id"`
+	SearchScore   float64 `json:"search_score,omitempty"`
 	Title         string  `json:"title"`
 	Description   string  `json:"description"`
 	ListID        string  `json:"list_id"`

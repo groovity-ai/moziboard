@@ -14,14 +14,17 @@ func NewService(repo *Repository) *Service {
 	return &Service{repo: repo}
 }
 
-func (s *Service) ListBoards(ctx context.Context) ([]Board, error) {
-	return s.repo.ListBoards(ctx)
+func (s *Service) ListBoards(ctx context.Context, userID string) ([]Board, error) {
+	return s.repo.ListBoards(ctx, userID)
 }
 
-func (s *Service) CreateBoard(ctx context.Context, b *Board) error {
+func (s *Service) CreateBoard(ctx context.Context, b *Board, authUserID string) error {
 	b.Title = strings.TrimSpace(b.Title)
 	if b.Title == "" {
 		return errors.New("title is required")
+	}
+	if strings.TrimSpace(authUserID) != "" {
+		b.UserID = &authUserID
 	}
 	return s.repo.CreateBoard(ctx, b)
 }
