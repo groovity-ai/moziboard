@@ -33,10 +33,35 @@ export default function LoginPage() {
                 // Set cookie manually since AiAgenz backend only returns JSON token
                 document.cookie = `session_id=${data.token}; path=/; max-age=604800`;
                 toast.success("Login successful!");
-                // Assuming board ID generation or list happens in the backend, fallback to generic /dashboard or create a new board
-                // For now, redirect to a test board or a list
-                // If they don't have boards, maybe the backend creates a default one.
-                router.push("/board/default");
+
+                try {
+                    const boardsRes = await fetch('/api/boards');
+                    const boards = await boardsRes.json().catch(() => []);
+
+                    if (boardsRes.ok && Array.isArray(boards) && boards.length > 0 && boards[0]?.id) {
+                        router.push(`/board/${boards[0].id}`);
+                        return;
+                    }
+
+                    const createRes = await fetch('/api/boards', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            title: 'My First Board',
+                            description: 'Auto-created after login',
+                            user_id: data?.user?.id || null,
+                        }),
+                    });
+                    const createdBoard = await createRes.json().catch(() => null);
+                    if (createRes.ok && createdBoard?.id) {
+                        router.push(`/board/${createdBoard.id}`);
+                        return;
+                    }
+                } catch (redirectError) {
+                    console.error('Post-login board bootstrap failed', redirectError);
+                }
+
+                router.push('/');
             } else {
                 toast.error(data.error || data.message || "Failed to login");
             }
