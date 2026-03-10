@@ -171,10 +171,10 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
 
           <div className="flex min-h-0 flex-1 overflow-hidden">
             {activeTab === 'overview' && (
-              <div className="grid min-h-0 flex-1 gap-6 overflow-y-auto p-6 xl:grid-cols-[1.2fr_0.8fr]">
-                <div className="space-y-6">
-                  <section className="rounded-2xl border p-4 dark:border-zinc-800">
-                    <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="min-h-0 flex-1 overflow-y-auto p-6">
+                <div className="mx-auto max-w-3xl space-y-8">
+                  <section>
+                    <div className="mb-4 flex items-center justify-between gap-3">
                       <div className="text-sm font-semibold">Description / Context</div>
                       <div className="flex items-center gap-2">
                         {isEditingDescription ? (
@@ -208,22 +208,18 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
                         )}
                       </div>
                     </div>
-                    <div className="min-h-[260px]">
+                    <div className="min-h-[280px]">
                       {isEditingDescription ? (
                         <RichTextEditor content={description} onChange={setDescription} placeholder="Add details..." />
+                      ) : description?.trim() ? (
+                        <div className="prose prose-sm max-w-none dark:prose-invert break-words">
+                          <ReactMarkdown>{description.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]*>/g, '')}</ReactMarkdown>
+                        </div>
                       ) : (
-                        <div className="min-h-[260px] rounded-2xl border bg-zinc-50/70 p-5 dark:border-zinc-800 dark:bg-zinc-950/40">
-                          {description?.trim() ? (
-                            <div className="prose prose-sm max-w-none dark:prose-invert break-words">
-                              <ReactMarkdown>{description.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]*>/g, '')}</ReactMarkdown>
-                            </div>
-                          ) : (
-                            <div className="flex h-[220px] flex-col items-center justify-center text-center text-muted-foreground">
-                              <LayoutList size={28} className="mb-3 opacity-30" />
-                              <div className="text-sm font-medium">No description yet</div>
-                              <div className="mt-1 text-xs">Add context, goals, specs, or acceptance criteria for this task.</div>
-                            </div>
-                          )}
+                        <div className="flex min-h-[240px] flex-col items-center justify-center text-center text-muted-foreground">
+                          <LayoutList size={28} className="mb-3 opacity-30" />
+                          <div className="text-sm font-medium">No description yet</div>
+                          <div className="mt-1 text-xs">Add context, goals, specs, or acceptance criteria for this task.</div>
                         </div>
                       )}
                     </div>
@@ -237,33 +233,33 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
                       <div className="text-sm text-red-700/90 dark:text-red-200">{task.blocked_reason}</div>
                     </section>
                   )}
-                </div>
 
-                <div className="space-y-4">
-                  <section className="rounded-2xl border p-4 dark:border-zinc-800">
-                    <div className="mb-3 text-sm font-semibold">Task Metadata</div>
-                    <div className="space-y-4">
-                      <MetaField label="Assignee">
-                        <select value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)} className="w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none focus:border-rose-500 dark:border-zinc-700">
-                          <option value="">Unassigned</option>
-                          {members?.map((m) => <option key={m.id} value={m.id}>{m.avatar} {m.name} ({m.role})</option>)}
-                        </select>
-                      </MetaField>
-                      <MetaField label="Board">
-                        <select value={boardId} onChange={(e) => setBoardId(e.target.value)} className="w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none focus:border-rose-500 dark:border-zinc-700">
-                          {boards?.map((b) => <option key={b.id} value={b.id}>{b.title}</option>)}
-                        </select>
-                      </MetaField>
+                  <section className="grid gap-4 lg:grid-cols-[1fr_1fr]">
+                    <div className="rounded-2xl border p-4 dark:border-zinc-800">
+                      <div className="mb-3 text-sm font-semibold">Task Metadata</div>
+                      <div className="space-y-4">
+                        <MetaField label="Assignee">
+                          <select value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)} className="w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none focus:border-rose-500 dark:border-zinc-700">
+                            <option value="">Unassigned</option>
+                            {members?.map((m) => <option key={m.id} value={m.id}>{m.avatar} {m.name} ({m.role})</option>)}
+                          </select>
+                        </MetaField>
+                        <MetaField label="Board">
+                          <select value={boardId} onChange={(e) => setBoardId(e.target.value)} className="w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none focus:border-rose-500 dark:border-zinc-700">
+                            {boards?.map((b) => <option key={b.id} value={b.id}>{b.title}</option>)}
+                          </select>
+                        </MetaField>
+                      </div>
                     </div>
-                  </section>
 
-                  <section className="rounded-2xl border p-4 dark:border-zinc-800">
-                    <div className="mb-3 text-sm font-semibold">Quick Signals</div>
-                    <div className="grid grid-cols-2 gap-3 text-sm">
-                      <SignalCard label="Comments" value={String(comments?.length || 0)} />
-                      <SignalCard label="Deliverables" value={String(deliverables?.length || 0)} />
-                      <SignalCard label="Activity" value={String(activities?.length || 0)} />
-                      <SignalCard label="Status" value={task.status || task.list_id} />
+                    <div className="rounded-2xl border p-4 dark:border-zinc-800">
+                      <div className="mb-3 text-sm font-semibold">Quick Signals</div>
+                      <div className="grid grid-cols-2 gap-3 text-sm">
+                        <SignalCard label="Comments" value={String(comments?.length || 0)} />
+                        <SignalCard label="Deliverables" value={String(deliverables?.length || 0)} />
+                        <SignalCard label="Activity" value={String(activities?.length || 0)} />
+                        <SignalCard label="Status" value={task.status || task.list_id} />
+                      </div>
                     </div>
                   </section>
                 </div>
