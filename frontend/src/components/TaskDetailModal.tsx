@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Task } from './Board';
-import { X, Send, User, MessageCircle, PackageCheck, History, LayoutList, AlertTriangle } from 'lucide-react';
+import { X, Send, User, MessageCircle, PackageCheck, History, LayoutList, AlertTriangle, Pencil, Eye } from 'lucide-react';
 import useSWR, { mutate } from 'swr';
+import ReactMarkdown from 'react-markdown';
 import { RichTextEditor } from './ui/rich-text-editor';
 import { Drawer, DrawerContent } from './ui/drawer';
 
@@ -64,6 +65,7 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
   const [assigneeId, setAssigneeId] = useState(task.assignee_id || '');
   const [boardId, setBoardId] = useState(task.board_id || '');
   const [activeTab, setActiveTab] = useState<'overview' | 'discussion' | 'deliverables' | 'activity'>('overview');
+  const [isEditingDescription, setIsEditingDescription] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   const { data: boards } = useSWR<any[]>('/api/boards', fetcher);
@@ -78,6 +80,7 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
     setAssigneeId(task.assignee_id || '');
     setBoardId(task.board_id || '');
     setActiveTab('overview');
+    setIsEditingDescription(false);
   }, [task]);
 
   useEffect(() => {
@@ -171,9 +174,58 @@ export function TaskDetailModal({ task, isOpen, onClose }: TaskDetailModalProps)
               <div className="grid min-h-0 flex-1 gap-6 overflow-y-auto p-6 xl:grid-cols-[1.2fr_0.8fr]">
                 <div className="space-y-6">
                   <section className="rounded-2xl border p-4 dark:border-zinc-800">
-                    <div className="mb-3 text-sm font-semibold">Description / Context</div>
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <div className="text-sm font-semibold">Description / Context</div>
+                      <div className="flex items-center gap-2">
+                        {isEditingDescription ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDescription(task.description || '');
+                                setIsEditingDescription(false);
+                              }}
+                              className="rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setIsEditingDescription(false)}
+                              className="inline-flex items-center gap-1 rounded-lg bg-black px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-white dark:text-black dark:hover:bg-zinc-200"
+                            >
+                              <Eye size={12} /> Done editing
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setIsEditingDescription(true)}
+                            className="inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                          >
+                            <Pencil size={12} /> Edit
+                          </button>
+                        )}
+                      </div>
+                    </div>
                     <div className="min-h-[260px]">
-                      <RichTextEditor content={description} onChange={setDescription} placeholder="Add details..." />
+                      {isEditingDescription ? (
+                        <RichTextEditor content={description} onChange={setDescription} placeholder="Add details..." />
+                      ) : (
+                        <div className="min-h-[260px] rounded-2xl border bg-zinc-50/70 p-5 dark:border-zinc-800 dark:bg-zinc-950/40">
+                          {description?.trim() ? (
+                            <div className="prose prose-sm max-w-none dark:prose-invert break-words">
+                              <ReactMarkdown>{description.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]*>/g, '')}</ReactMarkdown>
+                            </div>
+                          ) : (
+                            <div className="flex h-[220px] flex-col items-center justify-center text-center text-muted-foreground">
+                              <LayoutList size={28} className="mb-3 opacity-30" />
+                              <div className="text-sm font-medium">No description yet</div>
+                              <div className="mt-1 text-xs">Add context, goals, specs, or acceptance criteria for this task.</div>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </section>
 
