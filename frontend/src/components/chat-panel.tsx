@@ -5,7 +5,7 @@ import { Chat } from "@/components/chat";
 import { useChatPanel } from "@/providers/chat-panel-provider";
 
 export const ChatPanel = () => {
-    const { isOpen, close, activeAgentId } = useChatPanel();
+    const { isOpen, close, activeTarget } = useChatPanel();
 
     return (
         <div
@@ -14,11 +14,11 @@ export const ChatPanel = () => {
                 isOpen ? "ml-1 w-96 pr-2 opacity-100" : "w-0 opacity-0",
             )}
         >
-            {isOpen && (
+            {isOpen && activeTarget && (
                 <div className="bg-background flex h-full flex-col overflow-hidden rounded-xl border">
                     <Chat
-                        sessionKey={`mozi:global:${activeAgentId}`} // Unique session per agent
-                        projectId={activeAgentId}
+                        sessionKey={`mozi:global:${activeTarget.agentId}`}
+                        projectId={activeTarget.projectId || activeTarget.agentId}
                         mode="panel"
                         onClose={close}
                         className="h-full border-l-0"

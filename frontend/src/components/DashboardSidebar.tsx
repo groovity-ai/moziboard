@@ -44,13 +44,28 @@ type ClawnProject = {
     already_connected?: boolean;
 };
 
+function runtimeStatusTone(status?: string) {
+    const value = (status || "unknown").toLowerCase();
+    if (value === "running" || value === "online") return "bg-green-100 text-green-700 dark:bg-green-900/20 dark:text-green-300";
+    if (value === "stopped" || value === "offline") return "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300";
+    if (value === "exited" || value === "failed" || value === "error") return "bg-red-100 text-red-700 dark:bg-red-900/20 dark:text-red-300";
+    return "bg-amber-100 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300";
+}
+
+function resolveChatProjectId(agentId: string) {
+    if (agentId.startsWith("clawn-project:")) {
+        return agentId.replace(/^clawn-project:/, "");
+    }
+    return agentId;
+}
+
 export function DashboardSidebar({
     ...props
 }: React.ComponentProps<typeof Sidebar>) {
     const params = useParams();
     const id = params.id as string;
     const pathname = usePathname();
-    const { toggle, isOpen, activeAgentId, setActiveAgentId, open: openChat } = useChatPanel();
+    const { toggle, isOpen, activeAgentId, setActiveTarget, open: openChat } = useChatPanel();
 
     const [connectedAgents, setConnectedAgents] = React.useState<BoardAgentEntry[]>([]);
     const [availableCount, setAvailableCount] = React.useState(0);
@@ -185,20 +200,31 @@ export function DashboardSidebar({
                                                 isActive={isOpen && activeAgentId === agent.id}
                                                 onClick={(e) => {
                                                     e.preventDefault();
-                                                    setActiveAgentId(agent.id);
+                                                    setActiveTarget({
+                                                        agentId: agent.id,
+                                                        projectId: resolveChatProjectId(agent.id),
+                                                        displayName: agent.display_name || agent.id,
+                                                    });
                                                     openChat();
                                                     toast.success(`Connected to ${agent.display_name || agent.id}`);
                                                 }}
                                                 className={activeAgentId === agent.id ? "text-primary" : ""}
                                             >
-                                                <div className="flex items-center gap-2 w-full">
-                                                    <div className="relative">
+                                                <div className="flex items-center gap-2 w-full min-w-0">
+                                                    <div className="relative shrink-0">
                                                         <img src={`https://api.dicebear.com/7.x/bottts/svg?seed=${agent.id}`} alt="Bot avatar" className="w-5 h-5 rounded bg-muted" />
-                                                        {(agent.status || '').toLowerCase() === "online" && (
+                                                        {((agent.status || '').toLowerCase() === "online" || (agent.status || '').toLowerCase() === "running") && (
                                                             <span className="absolute -bottom-0.5 -right-0.5 w-1.5 h-1.5 bg-green-500 rounded-full"></span>
                                                         )}
                                                     </div>
-                                                    <span className="truncate flex-1">{agent.display_name || agent.id}</span>
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className="truncate">{agent.display_name || agent.id}</div>
+                                                        <div className="mt-1">
+                                                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${runtimeStatusTone(agent.status)}`}>
+                                                                {(agent.status || 'unknown')}
+                                                            </span>
+                                                        </div>
+                                                    </div>
                                                 </div>
                                             </SidebarMenuButton>
                                         </SidebarMenuItem>

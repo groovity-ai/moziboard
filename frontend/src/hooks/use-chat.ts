@@ -55,10 +55,7 @@ export const useChat = ({
 
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const host = window.location.host;
-
-        // In dev, assuming proxy routes /api/projects...
-        // Adjust if MoziBoard has a different route, but we'll try to use the same existing Go backend
-        const wsUrl = `${protocol}//localhost:4001/api/projects/${projectId}/ws?token=${projectId}&client=webchat`;
+        const wsUrl = `${protocol}//${host}/api/projects/${projectId}/ws?token=${projectId}&client=webchat`;
 
         console.log(`[use-chat WS] Connecting to ${wsUrl}...`);
         const ws = new WebSocket(wsUrl);
