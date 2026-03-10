@@ -240,6 +240,22 @@ type Comment struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type ClawnProjectSource struct {
+	ProjectID        string   `json:"project_id"`
+	DisplayName      string   `json:"display_name"`
+	OwnerUserID      string   `json:"owner_user_id,omitempty"`
+	Engine           string   `json:"engine,omitempty"`
+	Plan             string   `json:"plan,omitempty"`
+	Status           string   `json:"status,omitempty"`
+	ContainerID      string   `json:"container_id,omitempty"`
+	ContainerName    string   `json:"container_name,omitempty"`
+	Capabilities     []string `json:"capabilities,omitempty"`
+	IsConnectable    bool     `json:"is_connectable"`
+	ConnectReason    string   `json:"connect_reason,omitempty"`
+	AlreadyConnected bool     `json:"already_connected"`
+	ExistingAgentID  *string  `json:"existing_agent_id,omitempty"`
+}
+
 type GeminiEmbeddingResponse struct {
 	Embedding struct {
 		Values []float32 `json:"values"`
@@ -689,6 +705,7 @@ func main() {
 	app.Post("/api/agents/:id/heartbeat", heartbeatAgent)
 	app.Put("/api/agents/:id/status", updateAgentStatus)
 	app.Get("/api/agents/sync/aiagenz", getAiAgenzProjects)
+	app.Get("/api/integrations/clawn/projects", listClawnProjectsFacade)
 
 	// Auth Proxies
 	app.Post("/api/auth/login", proxyAuthLogin)
@@ -1608,42 +1625,182 @@ func truncateForLog(s string, max int) string {
 	return s[:max] + "..."
 }
 
-// getAiAgenzProjects proxies a request to the main AiAgenz backend to fetch the user's projects (agents).
-func getAiAgenzProjects(c *fiber.Ctx) error {
-	// The user needs to pass their session cookie or bearer token from the frontend.
-	// We'll forward the entire Cookie header to the AiAgenz API.
-	authCookie := c.Get("Cookie")
-	if authCookie == "" {
-		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized: Missing authentication cookie"})
+func interfaceToString(v interface{}) string {
+	if v == nil {
+		return ""
 	}
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t)
+	case fmt.Stringer:
+		return strings.TrimSpace(t.String())
+	case float64:
+		return strings.TrimSpace(strconv.FormatFloat(t, 'f', -1, 64))
+	case int:
+		return strconv.Itoa(t)
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case json.Number:
+		return t.String()
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", v))
+	}
+}
 
-	// Assuming the AiAgenz backend is running on 172.17.0.1:4001
+func interfaceToStringSlice(v interface{}) []string {
+	switch t := v.(type) {
+	case []string:
+		return t
+	case []interface{}:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			s := interfaceToString(item)
+			if s != "" && s != "<nil>" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return []string{}
+	}
+}
+
+func buildAiAgenzAuthHeaders(c *fiber.Ctx, req *http.Request) bool {
+	authHeader := strings.TrimSpace(c.Get("Authorization"))
+	authCookie := strings.TrimSpace(c.Get("Cookie"))
+	if authHeader == "" && authCookie == "" {
+		return false
+	}
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	if authCookie != "" {
+		req.Header.Set("Cookie", authCookie)
+	}
+	return true
+}
+
+func fetchAiAgenzProjects(c *fiber.Ctx) ([]map[string]interface{}, int, error) {
 	proxyURL := "http://172.17.0.1:4001/api/projects"
-
 	req, err := http.NewRequest("GET", proxyURL, nil)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Failed to create proxy request"})
+		return nil, 500, fmt.Errorf("failed to create proxy request")
 	}
-
-	req.Header.Set("Cookie", authCookie)
+	if !buildAiAgenzAuthHeaders(c, req) {
+		return nil, 401, fmt.Errorf("unauthorized: missing authentication header or cookie")
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return c.Status(502).JSON(fiber.Map{"error": "Failed to connect to AiAgenz backend: " + err.Error()})
+		return nil, 502, fmt.Errorf("failed to connect to AiAgenz backend: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return c.Status(resp.StatusCode).JSON(fiber.Map{"error": "AiAgenz API returned an error status: " + resp.Status})
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
+		return nil, resp.StatusCode, fmt.Errorf("AiAgenz API returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
-	var data interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Failed to parse AiAgenz response"})
+	var payload struct {
+		Data []map[string]interface{} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, 500, fmt.Errorf("failed to parse AiAgenz response")
+	}
+	if payload.Data == nil {
+		payload.Data = []map[string]interface{}{}
+	}
+	return payload.Data, 200, nil
+}
+
+func normalizeClawnProjectSource(item map[string]interface{}) ClawnProjectSource {
+	projectID := firstNonEmpty(interfaceToString(item["project_id"]), interfaceToString(item["id"]))
+	displayName := firstNonEmpty(interfaceToString(item["display_name"]), interfaceToString(item["name"]), projectID)
+	status := firstNonEmpty(interfaceToString(item["status"]), "unknown")
+	engine := firstNonEmpty(interfaceToString(item["engine"]), "openclaw")
+	caps := interfaceToStringSlice(item["capabilities"])
+	isConnectable := projectID != ""
+	connectReason := "project_runtime_available"
+	if projectID == "" {
+		isConnectable = false
+		connectReason = "missing_project_id"
+	} else if status == "failed" || status == "deleted" {
+		isConnectable = false
+		connectReason = "project_not_available"
 	}
 
-	return c.JSON(data)
+	return ClawnProjectSource{
+		ProjectID:     projectID,
+		DisplayName:   displayName,
+		OwnerUserID:   interfaceToString(item["userId"]),
+		Engine:        engine,
+		Plan:          interfaceToString(item["plan"]),
+		Status:        status,
+		ContainerID:   interfaceToString(item["containerId"]),
+		ContainerName: interfaceToString(item["containerName"]),
+		Capabilities:  caps,
+		IsConnectable: isConnectable,
+		ConnectReason: connectReason,
+	}
+}
+
+func listClawnProjectsFacade(c *fiber.Ctx) error {
+	boardID := strings.TrimSpace(c.Query("board_id"))
+	rawProjects, statusCode, err := fetchAiAgenzProjects(c)
+	if err != nil {
+		return c.Status(statusCode).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	existingByProjectID := map[string]string{}
+	if boardID != "" {
+		rows, err := db.Query(context.Background(), `
+			SELECT ba.agent_id, ac.metadata_json::text
+			FROM board_agents ba
+			JOIN agent_connectors ac ON ac.agent_id = ba.agent_id
+			WHERE ba.board_id = $1
+			  AND ac.connector_type = 'clawn_native'`, boardID)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var agentID, metaText string
+				if err := rows.Scan(&agentID, &metaText); err != nil {
+					continue
+				}
+				if strings.TrimSpace(metaText) == "" {
+					continue
+				}
+				var meta map[string]interface{}
+				if json.Unmarshal([]byte(metaText), &meta) != nil {
+					continue
+				}
+				projectID := interfaceToString(meta["clawn_project_id"])
+				if projectID != "" {
+					existingByProjectID[projectID] = agentID
+				}
+			}
+		}
+	}
+
+	items := make([]ClawnProjectSource, 0, len(rawProjects))
+	for _, raw := range rawProjects {
+		item := normalizeClawnProjectSource(raw)
+		if existingAgentID, ok := existingByProjectID[item.ProjectID]; ok {
+			item.AlreadyConnected = true
+			item.ExistingAgentID = &existingAgentID
+		}
+		items = append(items, item)
+	}
+	return c.JSON(items)
+}
+
+// getAiAgenzProjects proxies a request to the main AiAgenz backend to fetch the user's projects (agents).
+func getAiAgenzProjects(c *fiber.Ctx) error {
+	items, statusCode, err := fetchAiAgenzProjects(c)
+	if err != nil {
+		return c.Status(statusCode).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"data": items})
 }
 
 // proxyAuthLogin forwards login requests to AiAgenz
