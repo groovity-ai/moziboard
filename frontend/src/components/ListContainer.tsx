@@ -5,18 +5,20 @@ import { TaskCard } from './TaskCard';
 import { ListType, Task } from './Board';
 import { mutate } from 'swr';
 import { Plus, X } from 'lucide-react';
+import clsx from 'clsx';
 
 interface ListContainerProps {
   list: ListType;
   boardId: string;
   onTaskClick?: (task: Task) => void;
+  isActiveDropTarget?: boolean;
 }
 
-export function ListContainer({ list, boardId, onTaskClick }: ListContainerProps) {
+export function ListContainer({ list, boardId, onTaskClick, isActiveDropTarget = false }: ListContainerProps) {
   const [isAdding, setIsAdding] = useState(false);
   const [newTitle, setNewTitle] = useState('');
 
-  const { setNodeRef } = useDroppable({
+  const { setNodeRef, isOver } = useDroppable({
     id: list.id,
   });
 
@@ -42,23 +44,31 @@ export function ListContainer({ list, boardId, onTaskClick }: ListContainerProps
   return (
     <div
       ref={setNodeRef}
-      className="flex h-fit w-[350px] shrink-0 flex-col gap-4 rounded-xl bg-gray-100 p-4 shadow-sm dark:bg-zinc-900"
+      className={clsx(
+        'flex h-fit w-[350px] shrink-0 flex-col gap-4 rounded-xl border bg-gray-100 p-4 shadow-sm transition-all dark:bg-zinc-900',
+        (isOver || isActiveDropTarget)
+          ? 'border-rose-400 ring-2 ring-rose-200 dark:border-rose-500 dark:ring-rose-900/30'
+          : 'border-transparent'
+      )}
     >
-      <div
-        className="flex items-center justify-between text-lg font-bold"
-      >
+      <div className="flex items-center justify-between text-lg font-bold">
         <span>{list.title}</span>
         <span className="rounded-full bg-gray-200 px-2 py-1 text-sm dark:bg-zinc-800">
           {list.tasks.length}
         </span>
       </div>
 
-      <div className="flex flex-col gap-2">
+      <div className="flex min-h-[120px] flex-col gap-2">
         <SortableContext items={list.tasks.map((t) => t.id)} strategy={verticalListSortingStrategy}>
           {list.tasks.map((task) => (
             <TaskCard key={task.id} task={task} onClick={() => onTaskClick?.(task)} />
           ))}
         </SortableContext>
+        {list.tasks.length === 0 && (
+          <div className="flex min-h-[100px] items-center justify-center rounded-xl border border-dashed border-gray-300 bg-white/60 text-sm text-gray-400 dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-500">
+            Drop task here
+          </div>
+        )}
       </div>
 
       {isAdding ? (
@@ -73,7 +83,7 @@ export function ListContainer({ list, boardId, onTaskClick }: ListContainerProps
               if (e.key === 'Escape') { setIsAdding(false); setNewTitle(''); }
             }}
             placeholder="Enter task title..."
-            className="w-full rounded-lg border bg-white px-3 py-2 text-sm outline-none focus:border-rose-500 focus:ring-1 focus:ring-rose-500 dark:bg-zinc-800 dark:border-zinc-700"
+            className="w-full rounded-lg border bg-white px-3 py-2 text-sm outline-none focus:border-rose-500 focus:ring-1 focus:ring-rose-500 dark:border-zinc-700 dark:bg-zinc-800"
           />
           <div className="flex gap-2">
             <button

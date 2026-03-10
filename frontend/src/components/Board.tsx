@@ -9,13 +9,10 @@ import {
   useSensor,
   useSensors,
   DragStartEvent,
-  DragOverEvent,
   DragEndEvent,
 } from '@dnd-kit/core';
 import {
-  SortableContext,
   sortableKeyboardCoordinates,
-  horizontalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { ListContainer } from './ListContainer';
 import { TaskCard } from './TaskCard';
@@ -24,7 +21,7 @@ import { SearchBar } from './SearchBar';
 
 export type Task = {
   id: string | number;
-  board_id: string; // UUID
+  board_id: string;
   title: string;
   description?: string;
   list_id: string;
@@ -52,17 +49,107 @@ interface BoardProps {
   boardId: string;
 }
 
+function buildListsFromTasks(tasks: Task[] | undefined): ListType[] {
+  return defaultLists.map((list) => ({
+    ...list,
+    tasks: (tasks || [])
+      .filter((t) => t.list_id === list.id)
+      .sort((a, b) => a.position - b.position),
+  }));
+}
+
+function reindexListTasks(tasks: Task[], listId: string): Task[] {
+  return tasks.map((task, index) => ({
+    ...task,
+    list_id: listId,
+    position: index + 1,
+  }));
+}
+
+function findListIdForDrop(lists: ListType[], overId: string | number | null | undefined): string | null {
+  if (!overId) return null;
+  const overStr = String(overId);
+  if (lists.some((list) => list.id === overStr)) return overStr;
+  for (const list of lists) {
+    if (list.tasks.some((task) => String(task.id) === overStr)) return list.id;
+  }
+  return null;
+}
+
+function moveTaskInLists(lists: ListType[], activeId: string, overId: string): { nextLists: ListType[]; changedTasks: Task[] } {
+  const cloned = lists.map((list) => ({ ...list, tasks: [...list.tasks] }));
+
+  let sourceListIndex = -1;
+  let sourceTaskIndex = -1;
+  for (let i = 0; i < cloned.length; i++) {
+    const idx = cloned[i].tasks.findIndex((task) => String(task.id) === activeId);
+    if (idx >= 0) {
+      sourceListIndex = i;
+      sourceTaskIndex = idx;
+      break;
+    }
+  }
+
+  if (sourceListIndex === -1 || sourceTaskIndex === -1) {
+    return { nextLists: lists, changedTasks: [] };
+  }
+
+  const sourceList = cloned[sourceListIndex];
+  const [movedTask] = sourceList.tasks.splice(sourceTaskIndex, 1);
+  const targetListId = findListIdForDrop(cloned, overId) || movedTask.list_id;
+  const targetListIndex = cloned.findIndex((list) => list.id === targetListId);
+  if (targetListIndex === -1) {
+    return { nextLists: lists, changedTasks: [] };
+  }
+
+  const targetList = cloned[targetListIndex];
+  let insertIndex = targetList.tasks.length;
+  if (overId === targetList.id) {
+    insertIndex = targetList.tasks.length;
+  } else {
+    const overTaskIndex = targetList.tasks.findIndex((task) => String(task.id) === overId);
+    if (overTaskIndex >= 0) {
+      insertIndex = overTaskIndex;
+    }
+  }
+
+  targetList.tasks.splice(insertIndex, 0, { ...movedTask, list_id: targetList.id });
+
+  const reindexedSource = reindexListTasks(sourceList.tasks, sourceList.id);
+  const reindexedTarget = sourceList.id === targetList.id
+    ? reindexListTasks(targetList.tasks, targetList.id)
+    : reindexListTasks(targetList.tasks, targetList.id);
+
+  cloned[sourceListIndex] = {
+    ...sourceList,
+    tasks: sourceList.id === targetList.id ? reindexedTarget : reindexedSource,
+  };
+  cloned[targetListIndex] = {
+    ...targetList,
+    tasks: reindexedTarget,
+  };
+
+  const changedMap = new Map<string, Task>();
+  cloned[sourceListIndex].tasks.forEach((task) => changedMap.set(String(task.id), task));
+  cloned[targetListIndex].tasks.forEach((task) => changedMap.set(String(task.id), task));
+
+  return {
+    nextLists: cloned,
+    changedTasks: Array.from(changedMap.values()),
+  };
+}
+
 export function Board({ boardId }: BoardProps) {
-  const { data: tasks, error } = useSWR<Task[]>(`/api/boards/${boardId}/tasks`, fetcher, {
+  const { data: tasks } = useSWR<Task[]>(`/api/boards/${boardId}/tasks`, fetcher, {
     revalidateOnFocus: false,
-    refreshInterval: 0
+    refreshInterval: 0,
   });
 
   const [lists, setLists] = useState<ListType[]>(defaultLists);
   const [activeTask, setActiveTask] = useState<Task | null>(null);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [activeListId, setActiveListId] = useState<string | null>(null);
 
-  // WebSocket Setup with reconnection
   useEffect(() => {
     let ws: WebSocket | null = null;
     let reconnectTimeout: ReturnType<typeof setTimeout>;
@@ -72,22 +159,17 @@ export function Board({ boardId }: BoardProps) {
     function connect() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/ws`;
-
-      console.log("Connecting to WS:", wsUrl);
       ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
-        console.log("✅ WS Connected");
-        reconnectDelay = 1000; // Reset on successful connect
+        reconnectDelay = 1000;
       };
       ws.onmessage = (event) => {
-        console.log("📩 WS Update:", event.data);
-        if (event.data === "UPDATE") {
+        if (event.data === 'UPDATE') {
           mutate(`/api/boards/${boardId}/tasks`);
         }
       };
       ws.onclose = () => {
-        console.log(`❌ WS Disconnected. Reconnecting in ${reconnectDelay / 1000}s...`);
         reconnectTimeout = setTimeout(() => {
           reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
           connect();
@@ -106,12 +188,7 @@ export function Board({ boardId }: BoardProps) {
 
   useEffect(() => {
     if (tasks) {
-      setLists((prevLists) => {
-        return prevLists.map((list) => ({
-          ...list,
-          tasks: tasks.filter((t) => t.list_id === list.id).sort((a, b) => a.position - b.position),
-        }));
-      });
+      setLists(buildListsFromTasks(tasks));
     }
   }, [tasks]);
 
@@ -120,7 +197,7 @@ export function Board({ boardId }: BoardProps) {
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
 
-  async function updateTask(task: Task) {
+  async function persistTask(task: Task) {
     await fetch(`/api/tasks/${task.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -129,72 +206,39 @@ export function Board({ boardId }: BoardProps) {
   }
 
   const handleDragStart = (event: DragStartEvent) => {
-    const { active } = event;
-    const task = tasks?.find((t) => String(t.id) === String(active.id));
-    if (task) setActiveTask(task);
+    const task = tasks?.find((t) => String(t.id) === String(event.active.id));
+    if (task) {
+      setActiveTask(task);
+      setActiveListId(task.list_id);
+    }
   };
 
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
-    if (!over) {
-      setActiveTask(null);
-      return;
-    }
-
-    const activeId = active.id;
-    const overId = over.id;
-    
-    // Don't do anything if dropping on itself
-    if (activeId === overId) {
-      setActiveTask(null);
-      return;
-    }
-
-    let task = tasks?.find((t) => String(t.id) === String(activeId));
-    if (!task) {
-      setActiveTask(null);
-      return;
-    }
-
-    let newListId = task.list_id;
-    
-    // Check if over a list container
-    if (defaultLists.some(l => l.id === overId)) {
-      newListId = overId as string;
-    } else {
-      // Check if over another task
-      const overTask = tasks?.find(t => String(t.id) === String(overId));
-      if (overTask) {
-        newListId = overTask.list_id;
-      }
-    }
-
-    if (task.list_id !== newListId) {
-      // OPTIMISTIC UPDATE UI IMMEDIATELY
-      const updatedTask = { ...task, list_id: newListId };
-      
-      // Update local state immediately to prevent jumping
-      mutate(
-        `/api/boards/${boardId}/tasks`,
-        (currentTasks: Task[] | undefined) => {
-          if (!currentTasks) return [];
-          return currentTasks.map(t => 
-            String(t.id) === String(activeId) ? updatedTask : t
-          );
-        },
-        false // Do not revalidate immediately
-      );
-      
-      // Trigger background API call
-      try {
-        await updateTask(updatedTask);
-        // Will re-fetch real data when WS update arrives
-      } catch (err) {
-        // Rollback on error
-        mutate(`/api/boards/${boardId}/tasks`);
-      }
-    }
     setActiveTask(null);
+    setActiveListId(null);
+
+    if (!over) return;
+    const activeId = String(active.id);
+    const overId = String(over.id);
+    if (activeId === overId) return;
+
+    const { nextLists, changedTasks } = moveTaskInLists(lists, activeId, overId);
+    if (changedTasks.length === 0) return;
+
+    const optimisticTasks = nextLists.flatMap((list) => list.tasks);
+    const snapshotLists = lists;
+    setLists(nextLists);
+
+    mutate(`/api/boards/${boardId}/tasks`, optimisticTasks, false);
+
+    try {
+      await Promise.all(changedTasks.map((task) => persistTask(task)));
+      mutate(`/api/boards/${boardId}/tasks`);
+    } catch (error) {
+      setLists(snapshotLists);
+      mutate(`/api/boards/${boardId}/tasks`);
+    }
   };
 
   return (
@@ -215,10 +259,13 @@ export function Board({ boardId }: BoardProps) {
               key={list.id}
               list={list}
               boardId={boardId}
+              isActiveDropTarget={activeListId === list.id}
               onTaskClick={(task) => setSelectedTask(task)}
             />
           ))}
-          <DragOverlay>{activeTask ? <TaskCard task={activeTask} /> : null}</DragOverlay>
+          <DragOverlay>
+            {activeTask ? <TaskCard task={activeTask} dragOnly /> : null}
+          </DragOverlay>
         </div>
       </div>
 
