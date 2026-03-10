@@ -96,6 +96,7 @@ MoziBoard provides a Model Context Protocol (MCP) server for direct integration 
 Additional technical docs for agent/runtime integrations:
 - Runtime auth, webhook signing, and ops endpoints: `docs/runtime-auth-and-ops-api.md`
 - Clawn Agent Picker → MoziBoard Connect Flow blueprint: `docs/clawn-agent-picker-connect-flow.md`
+- MoziBoard vs Clawe UX gap audit (board/task-detail benchmark): `docs/moziboard-vs-clawe-ux-gap-audit.md`
 - Internal bridge and dispatcher hardening changelog: `docs/changelog-2026-03-09-internal-bridge-fix.md`
 
 ## 🚀 Getting Started
