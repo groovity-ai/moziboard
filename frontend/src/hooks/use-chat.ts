@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect } from "react";
 import type { ChatAttachment } from "@/components/chat/types";
+import { getSessionTokenFromCookie } from "@/lib/auth";
 
 export type Message = {
     id: string;
@@ -55,7 +56,12 @@ export const useChat = ({
 
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const host = window.location.host;
-        const wsUrl = `${protocol}//${host}/api/projects/${projectId}/ws?token=${projectId}&client=webchat`;
+        const authToken = getSessionTokenFromCookie();
+        const query = new URLSearchParams({ client: 'webchat' });
+        if (authToken) {
+            query.set('token', authToken);
+        }
+        const wsUrl = `${protocol}//${host}/api/projects/${projectId}/ws?${query.toString()}`;
 
         console.log(`[use-chat WS] Connecting to ${wsUrl}...`);
         const ws = new WebSocket(wsUrl);
