@@ -25,3 +25,9 @@ type Activity struct {
 	Details   string    `json:"details"`
 	CreatedAt time.Time `json:"created_at"`
 }
+
+type ReviewActionReq struct {
+	Action    string `json:"action"`
+	Note      string `json:"note"`
+	UpdatedBy string `json:"updated_by"`
+}

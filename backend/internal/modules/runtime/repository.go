@@ -6,9 +6,17 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	agentsmodule "moziboard-backend/internal/modules/agents"
+	"moziboard-backend/internal/workflow"
 )
 
 type Repository struct{ db *pgxpool.Pool }
+
+type TaskRecord struct {
+	ID         int
+	BoardID    string
+	Status     string
+	AssigneeID *string
+}
 
 func NewRepository(db *pgxpool.Pool) *Repository { return &Repository{db: db} }
 
@@ -39,6 +47,12 @@ func (r *Repository) EnsureAgentBoardAccess(ctx context.Context, agentID string,
 	return ok, err
 }
 
+func (r *Repository) GetTaskByID(ctx context.Context, taskID int) (TaskRecord, error) {
+	var rec TaskRecord
+	err := r.db.QueryRow(ctx, `SELECT id, board_id::text, status, assignee_id FROM tasks WHERE id=$1`, taskID).Scan(&rec.ID, &rec.BoardID, &rec.Status, &rec.AssigneeID)
+	return rec, err
+}
+
 func (r *Repository) ListActiveRunIDs(ctx context.Context, taskID int, agentID string) ([]int, error) {
 	rows, err := r.db.Query(ctx, `SELECT id FROM agent_runs WHERE task_id=$1 AND agent_id=$2 AND status IN ('queued','running','in_progress','blocked','review') ORDER BY started_at DESC`, taskID, agentID)
 	if err != nil {
@@ -60,10 +74,38 @@ func (r *Repository) CloseOtherRuns(ctx context.Context, taskID int, agentID str
 	return err
 }
 
-func (r *Repository) UpdateTaskAndRunState(ctx context.Context, taskID int, agentID string, taskStatus string, listID string, currentActivity string, blockedReason string, resultSummary string, runStatus string) error {
-	_, _ = r.db.Exec(ctx, `UPDATE tasks SET status=$1, list_id=$2, blocked_reason=$3 WHERE id=$4`, taskStatus, listID, blockedReason, taskID)
-	_, _ = r.db.Exec(ctx, `UPDATE agent_runs SET status=$1, current_activity=COALESCE(NULLIF($2,''), current_activity), error_summary=CASE WHEN $1='blocked' THEN $3 ELSE error_summary END, result_summary=CASE WHEN $4<>'' THEN $4 ELSE result_summary END WHERE task_id=$5 AND agent_id=$6 AND status IN ('queued','running','in_progress','blocked','review')`, runStatus, currentActivity, blockedReason, resultSummary, taskID, agentID)
-	return nil
+func (r *Repository) ApplyTaskStateSync(ctx context.Context, taskID int, agentID string, runID int, taskState string, currentActivity string, blockedReason string, resultSummary string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	listID := workflow.StatusToListID(taskState)
+	runStatus := workflow.MapTaskStateToRunState(taskState)
+	agentStatus, agentActivity, clearCurrent := workflow.DeriveAgentState(taskState)
+	if currentActivity == "" {
+		currentActivity = agentActivity
+	}
+	if _, err := tx.Exec(ctx, `UPDATE tasks SET status=$1, list_id=$2, blocked_reason=$3 WHERE id=$4`, taskState, listID, blockedReason, taskID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE agent_runs SET status=$1, current_activity=COALESCE(NULLIF($2,''), current_activity), error_summary=CASE WHEN $1='blocked' THEN $3 ELSE error_summary END, result_summary=CASE WHEN $4<>'' THEN $4 ELSE result_summary END, ended_at=CASE WHEN $1='done' THEN CURRENT_TIMESTAMP ELSE ended_at END WHERE id=$5`, runStatus, currentActivity, blockedReason, resultSummary, runID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE agent_runs SET status='done', ended_at=CURRENT_TIMESTAMP WHERE task_id=$1 AND agent_id=$2 AND id<>$3 AND status IN ('queued','running','in_progress','blocked','review')`, taskID, agentID, runID); err != nil {
+		return err
+	}
+	if clearCurrent {
+		if _, err := tx.Exec(ctx, `UPDATE agents SET status=$1, current_task_id=NULL, current_run_id=NULL, current_activity=$2, health_note='', last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$3`, agentStatus, currentActivity, agentID); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.Exec(ctx, `UPDATE agents SET status=$1, current_task_id=$2, current_run_id=$3, current_activity=$4, health_note=$5, last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$6`, agentStatus, taskID, runID, currentActivity, blockedReason, agentID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *Repository) UpdateRuntimeHeartbeat(ctx context.Context, connectorID int, agentID, status, currentActivity string, currentTaskID *int) error {
@@ -80,16 +122,6 @@ func (r *Repository) InsertComment(ctx context.Context, taskID int, userID, cont
 	return err
 }
 
-func (r *Repository) UpdateAgentWorkingState(ctx context.Context, agentID string, taskID int, runID int, currentActivity string) error {
-	_, err := r.db.Exec(ctx, `UPDATE agents SET status='busy', current_task_id=$1, current_run_id=$2, current_activity=$3, last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$4`, taskID, runID, currentActivity, agentID)
-	return err
-}
-
-func (r *Repository) UpdateAgentTaskState(ctx context.Context, agentID, status string, taskID int, runID int, currentActivity, healthNote string) error {
-	_, err := r.db.Exec(ctx, `UPDATE agents SET status=$1, current_task_id=$2, current_run_id=$3, current_activity=$4, health_note=$5, last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$6`, status, taskID, runID, currentActivity, healthNote, agentID)
-	return err
-}
-
 func (r *Repository) InsertDeliverable(ctx context.Context, taskID int, title, summary, artifactType, content string) error {
 	_, err := r.db.Exec(ctx, `INSERT INTO deliverables (task_id, title, description, artifact_type, content) VALUES ($1,$2,$3,$4,$5)`, taskID, title, summary, artifactType, content)
 	return err
@@ -97,11 +129,6 @@ func (r *Repository) InsertDeliverable(ctx context.Context, taskID int, title, s
 
 func (r *Repository) UpdateRunSummary(ctx context.Context, runID int, summary string) error {
 	_, err := r.db.Exec(ctx, `UPDATE agent_runs SET result_summary=$1 WHERE id=$2`, summary, runID)
-	return err
-}
-
-func (r *Repository) UpdateAgentWaitingReview(ctx context.Context, agentID string) error {
-	_, err := r.db.Exec(ctx, `UPDATE agents SET status='online', current_activity='Waiting for review', last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$1`, agentID)
 	return err
 }
 

@@ -72,6 +72,20 @@ func (r *Repository) UpdateEmbedding(ctx context.Context, id int, embedding stri
 	return err
 }
 
+func (r *Repository) MarkLatestRunDone(ctx context.Context, taskID int, agentID string, summary string) error {
+	_, err := r.db.Exec(ctx, `UPDATE agent_runs SET status='done', current_activity='Completed', result_summary=CASE WHEN $3<>'' THEN $3 ELSE result_summary END, ended_at=CURRENT_TIMESTAMP WHERE id = (SELECT id FROM agent_runs WHERE task_id=$1 AND agent_id=$2 ORDER BY id DESC LIMIT 1)`, taskID, agentID, summary)
+	return err
+}
+
+func (r *Repository) MarkLatestRunInProgress(ctx context.Context, taskID int, agentID string, note string) error {
+	activity := "Working on task"
+	if note != "" {
+		activity = note
+	}
+	_, err := r.db.Exec(ctx, `UPDATE agent_runs SET status='running', current_activity=$3, ended_at=NULL WHERE id = (SELECT id FROM agent_runs WHERE task_id=$1 AND agent_id=$2 ORDER BY id DESC LIMIT 1)`, taskID, agentID, activity)
+	return err
+}
+
 func (r *Repository) ListActivities(ctx context.Context, taskID int) ([]Activity, error) {
 	rows, err := r.db.Query(ctx, "SELECT id, task_id, user_id, action, details, created_at FROM activities WHERE task_id=$1 ORDER BY created_at DESC", taskID)
 	if err != nil {

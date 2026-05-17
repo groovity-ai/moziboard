@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"strings"
+
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -43,11 +45,7 @@ func (h *Handler) RuntimeTaskAck(c *fiber.Ctx) error {
 	}
 	runID, err := h.svc.RuntimeTaskAck(c.Context(), conn, req)
 	if err != nil {
-		code := 500
-		if err.Error() == "agent not connected to task board" {
-			code = 403
-		}
-		return c.Status(code).JSON(fiber.Map{"error": err.Error()})
+		return c.Status(runtimeErrorCode(err)).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"ok": true, "run_id": runID})
 }
@@ -63,11 +61,7 @@ func (h *Handler) RuntimeTaskUpdate(c *fiber.Ctx) error {
 	}
 	runID, err := h.svc.RuntimeTaskUpdate(c.Context(), conn, req)
 	if err != nil {
-		code := 500
-		if err.Error() == "agent not connected to task board" {
-			code = 403
-		}
-		return c.Status(code).JSON(fiber.Map{"error": err.Error()})
+		return c.Status(runtimeErrorCode(err)).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"ok": true, "run_id": runID})
 }
@@ -82,11 +76,7 @@ func (h *Handler) RuntimeTaskComment(c *fiber.Ctx) error {
 		return c.Status(400).SendString(err.Error())
 	}
 	if err := h.svc.RuntimeTaskComment(c.Context(), conn, req); err != nil {
-		code := 500
-		if err.Error() == "agent not connected to task board" {
-			code = 403
-		}
-		return c.Status(code).JSON(fiber.Map{"error": err.Error()})
+		return c.Status(runtimeErrorCode(err)).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"ok": true})
 }
@@ -102,11 +92,7 @@ func (h *Handler) RuntimeTaskDeliverable(c *fiber.Ctx) error {
 	}
 	runID, err := h.svc.RuntimeTaskDeliverable(c.Context(), conn, req)
 	if err != nil {
-		code := 500
-		if err.Error() == "agent not connected to task board" {
-			code = 403
-		}
-		return c.Status(code).JSON(fiber.Map{"error": err.Error()})
+		return c.Status(runtimeErrorCode(err)).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"ok": true, "run_id": runID})
 }
@@ -122,11 +108,28 @@ func (h *Handler) RuntimeTaskReviewRequest(c *fiber.Ctx) error {
 	}
 	runID, err := h.svc.RuntimeTaskReviewRequest(c.Context(), conn, req)
 	if err != nil {
-		code := 500
-		if err.Error() == "agent not connected to task board" {
-			code = 403
-		}
-		return c.Status(code).JSON(fiber.Map{"error": err.Error()})
+		return c.Status(runtimeErrorCode(err)).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"ok": true, "run_id": runID})
+}
+
+func runtimeErrorCode(err error) int {
+	if err == nil {
+		return 200
+	}
+	if err.Error() == "agent not connected to task board" {
+		return 403
+	}
+	if runtimeBadRequest(err) {
+		return 400
+	}
+	return 500
+}
+
+func runtimeBadRequest(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "invalid task transition") || strings.Contains(s, "required")
 }

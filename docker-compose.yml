@@ -19,6 +19,7 @@ services:
       - OPENCLAW_CLI_PATH=/root/.npm-global/bin/openclaw
       - OPENCLAW_GATEWAY_URL=http://host.docker.internal:18789/v1/chat/completions
       - OPENCLAW_GATEWAY_TOKEN=a5a3e43e5ef31b7a2fa8e073fbcf562ba35fd25d73599614
+      - OPS_MAINTENANCE_EVERY=10m
     depends_on:
       - db
       - redis

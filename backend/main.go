@@ -18,14 +18,14 @@ import (
 	"time"
 
 	"github.com/gofiber/contrib/websocket"
-	"github.com/google/uuid"
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/sashabaranov/go-openai"
+	activityfeedmodule "moziboard-backend/internal/modules/activityfeed"
 	agentinframodule "moziboard-backend/internal/modules/agentinfra"
 	agentsmodule "moziboard-backend/internal/modules/agents"
-	activityfeedmodule "moziboard-backend/internal/modules/activityfeed"
 	attentionmodule "moziboard-backend/internal/modules/attention"
 	authproxymodule "moziboard-backend/internal/modules/authproxy"
 	boardhealthmodule "moziboard-backend/internal/modules/boardhealth"
@@ -61,6 +61,10 @@ var (
 	clientsMu         sync.Mutex
 	wsHub             *realtime.Hub
 	deliverySemaphore = make(chan struct{}, 4)
+	latencyStats      = struct {
+		sync.Mutex
+		ByPath map[string]fiber.Map
+	}{ByPath: map[string]fiber.Map{}}
 )
 
 type Board struct {
@@ -405,8 +409,24 @@ func initDB() {
 		last_event_at TIMESTAMP NULL,
 		computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);`)
+	db.Exec(context.Background(), `
+	CREATE TABLE IF NOT EXISTS audit_logs (
+		id SERIAL PRIMARY KEY,
+		actor_type TEXT NOT NULL,
+		actor_id TEXT NOT NULL,
+		entity_type TEXT NOT NULL,
+		entity_id TEXT NOT NULL,
+		action TEXT NOT NULL,
+		old_value_json JSONB DEFAULT '{}'::jsonb,
+		new_value_json JSONB DEFAULT '{}'::jsonb,
+		metadata_json JSONB DEFAULT '{}'::jsonb,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);`)
+
 	db.Exec(context.Background(), "CREATE INDEX IF NOT EXISTS idx_board_stats_last_event_at ON board_stats(last_event_at DESC)")
 	db.Exec(context.Background(), "CREATE INDEX IF NOT EXISTS idx_tasks_board_status ON tasks(board_id, status)")
+	db.Exec(context.Background(), "CREATE INDEX IF NOT EXISTS idx_audit_logs_entity ON audit_logs(entity_type, entity_id, created_at DESC)")
+	db.Exec(context.Background(), "CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action, created_at DESC)")
 	db.Exec(context.Background(), "CREATE INDEX IF NOT EXISTS idx_documents_board_updated_at ON documents(board_id, updated_at DESC)")
 	db.Exec(context.Background(), "CREATE INDEX IF NOT EXISTS idx_activities_task_created_at ON activities(task_id, created_at DESC)")
 	db.Exec(context.Background(), "CREATE INDEX IF NOT EXISTS idx_board_agents_board_active ON board_agents(board_id, active)")
@@ -562,6 +582,42 @@ func main() {
 	})
 	app.Get("/ws", websocket.New(wsHub.HandleConnection))
 	app.Get("/api/health", func(c *fiber.Ctx) error { return c.JSON(fiber.Map{"status": "ok"}) })
+	app.Get("/api/readiness", func(c *fiber.Ctx) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		latencyStats.Lock()
+		latencySnapshot := fiber.Map{}
+		for k, v := range latencyStats.ByPath {
+			latencySnapshot[k] = v
+		}
+		latencyStats.Unlock()
+		status := fiber.Map{
+			"status":  "ready",
+			"time":    time.Now().UTC().Format(time.RFC3339),
+			"checks":  fiber.Map{},
+			"latency": latencySnapshot,
+		}
+		checks := status["checks"].(fiber.Map)
+		ready := true
+		if err := db.Ping(ctx); err != nil {
+			ready = false
+			checks["db"] = fiber.Map{"ok": false, "error": err.Error()}
+		} else {
+			checks["db"] = fiber.Map{"ok": true}
+		}
+		if err := rdb.Ping(ctx).Err(); err != nil {
+			ready = false
+			checks["redis"] = fiber.Map{"ok": false, "error": err.Error()}
+		} else {
+			checks["redis"] = fiber.Map{"ok": true}
+		}
+		checks["build"] = fiber.Map{"ok": true, "version": "moziboard-backend", "go_env": os.Getenv("GO_ENV")}
+		if !ready {
+			status["status"] = "degraded"
+			return c.Status(fiber.StatusServiceUnavailable).JSON(status)
+		}
+		return c.JSON(status)
+	})
 
 	app.Use(func(c *fiber.Ctx) error {
 		if strings.HasPrefix(c.Path(), "/api/") {
@@ -569,11 +625,35 @@ func main() {
 			if strings.TrimSpace(requestID) == "" {
 				requestID = uuid.NewString()
 			}
+			path := string(append([]byte(nil), c.Path()...))
+			method := c.Method()
 			c.Set("X-Request-ID", requestID)
 			c.Locals("request_id", requestID)
 			start := time.Now()
 			err := c.Next()
-			log.Printf("api_request request_id=%s method=%s path=%s status=%d duration_ms=%d", requestID, c.Method(), c.Path(), c.Response().StatusCode(), time.Since(start).Milliseconds())
+			durationMs := time.Since(start).Milliseconds()
+			log.Printf("api_request request_id=%s method=%s path=%s status=%d duration_ms=%d", requestID, method, path, c.Response().StatusCode(), durationMs)
+			if strings.HasPrefix(path, "/api/ops/") || strings.HasPrefix(path, "/api/runtime/") || path == "/api/readiness" || path == "/api/home/overview" {
+				latencyStats.Lock()
+				prev, ok := latencyStats.ByPath[path]
+				count := int64(1)
+				avg := durationMs
+				max := durationMs
+				if ok {
+					if v, vok := prev["count"].(int64); vok {
+						count = v + 1
+					}
+					if v, vok := prev["avg_ms"].(int64); vok {
+						avg = ((v * (count - 1)) + durationMs) / count
+					}
+					if v, vok := prev["max_ms"].(int64); vok && v > max {
+						max = v
+					}
+				}
+				latencyStats.ByPath[path] = fiber.Map{"last_ms": durationMs, "avg_ms": avg, "max_ms": max, "count": count, "last_status": c.Response().StatusCode(), "updated_at": time.Now().UTC().Format(time.RFC3339)}
+				latencyStats.Unlock()
+				log.Printf("api_latency request_id=%s method=%s path=%s status=%d duration_ms=%d", requestID, method, path, c.Response().StatusCode(), durationMs)
+			}
 			return err
 		}
 		return c.Next()
@@ -581,7 +661,7 @@ func main() {
 
 	authSession := authsession.New("http://172.17.0.1:4001")
 	app.Use(func(c *fiber.Ctx) error {
-		if c.Path() == "/api/health" {
+		if c.Path() == "/api/health" || c.Path() == "/api/readiness" {
 			return c.Next()
 		}
 		return authSession.RequireAuth(c)
@@ -648,6 +728,7 @@ func main() {
 	tasksSvc := tasksmodule.NewService(tasksRepo, tasksmodule.SideEffects{
 		AgentInfra:  agentInfraSvc,
 		LogActivity: logActivity,
+		AuditLog:    logAudit,
 		Broadcast:   broadcastUpdate,
 		AgentStateUpdater: tasksmodule.AgentStateUpdaterFuncs{
 			MarkQueuedFunc: func(taskID int, runID int, agentID string) {
@@ -655,6 +736,12 @@ func main() {
 			},
 			MarkBlockedFunc: func(blockedReason string, agentID string) {
 				db.Exec(context.Background(), "UPDATE agents SET status='blocked', current_activity=$1, health_note=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$3", "Blocked on task", blockedReason, agentID)
+			},
+			MarkOnlineFunc: func(agentID string) {
+				db.Exec(context.Background(), "UPDATE agents SET status='online', current_task_id=NULL, current_run_id=NULL, current_activity='Idle', health_note='', updated_at=CURRENT_TIMESTAMP WHERE id=$1", agentID)
+			},
+			MarkInProgressFunc: func(taskID int, agentID string) {
+				db.Exec(context.Background(), "UPDATE agents SET status='busy', current_task_id=$1, current_activity='Working on task', updated_at=CURRENT_TIMESTAMP WHERE id=$2", taskID, agentID)
 			},
 		},
 		Embedder: func(text string) (string, error) {
@@ -675,12 +762,20 @@ func main() {
 	agentsHandler.RegisterRoutes(app)
 
 	runtimeRepo := runtimemodule.NewRepository(db)
-	runtimeSvc := runtimemodule.NewService(runtimeRepo, hashToken, signWebhookPayload, agentInfraSvc, logActivity, broadcastUpdate, boardStatsSvc)
+	runtimeSvc := runtimemodule.NewService(runtimeRepo, hashToken, signWebhookPayload, agentInfraSvc, logActivity, logAudit, broadcastUpdate, boardStatsSvc)
 	runtimeHandler := runtimemodule.NewHandler(runtimeSvc)
 	runtimeHandler.RegisterRoutes(app)
 
 	opsRepo := opsmodule.NewRepository(db)
-	opsSvc := opsmodule.NewService(opsRepo, deliverySvc.DeliverPendingAgentEvents)
+	opsSvc := opsmodule.NewService(opsRepo, deliverySvc.DeliverPendingAgentEvents, logAudit)
+	if every := strings.TrimSpace(os.Getenv("OPS_MAINTENANCE_EVERY")); every != "" {
+		if dur, err := time.ParseDuration(every); err != nil {
+			log.Printf("ops_maintenance_scheduler invalid_duration=%q err=%v", every, err)
+		} else if dur > 0 {
+			opsSvc.ConfigureMaintenanceScheduler(dur)
+			opsSvc.StartMaintenanceScheduler(context.Background())
+		}
+	}
 	opsHandler := opsmodule.NewHandler(opsSvc)
 	opsHandler.RegisterRoutes(app)
 
@@ -867,6 +962,22 @@ func logActivity(taskID int, userID, action, details string) {
 	db.Exec(context.Background(),
 		"INSERT INTO activities (task_id, user_id, action, details) VALUES ($1, $2, $3, $4)",
 		taskID, userID, action, details)
+}
+
+func logAudit(actorType, actorID, entityType, entityID, action string, oldValue, newValue, metadata interface{}) {
+	oldJSON, _ := json.Marshal(defaultJSONMap(oldValue))
+	newJSON, _ := json.Marshal(defaultJSONMap(newValue))
+	metaJSON, _ := json.Marshal(defaultJSONMap(metadata))
+	db.Exec(context.Background(),
+		"INSERT INTO audit_logs (actor_type, actor_id, entity_type, entity_id, action, old_value_json, new_value_json, metadata_json) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb)",
+		actorType, actorID, entityType, entityID, action, string(oldJSON), string(newJSON), string(metaJSON))
+}
+
+func defaultJSONMap(v interface{}) interface{} {
+	if v == nil {
+		return map[string]interface{}{}
+	}
+	return v
 }
 
 func pgvector(v []float32) string { b, _ := json.Marshal(v); return string(b) }

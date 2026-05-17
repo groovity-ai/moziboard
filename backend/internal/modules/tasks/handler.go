@@ -26,6 +26,7 @@ func (h *Handler) RegisterRoutes(app fiber.Router) {
 	app.Get("/api/boards/:id/tasks", h.requireBoardAuth, h.GetBoardTasks)
 	app.Post("/api/tasks", h.requireBoardFromBody, h.CreateTask)
 	app.Put("/api/tasks/:id", h.requireTaskAuth, h.UpdateTask)
+	app.Post("/api/tasks/:id/review-action", h.requireTaskAuth, h.ApplyReviewAction)
 	app.Get("/api/tasks/:id/activities", h.requireTaskAuth, h.GetTaskActivities)
 	app.Get("/api/search", h.requireBoardFromQuery, h.SearchTasks)
 }
@@ -44,7 +45,7 @@ func (h *Handler) CreateTask(c *fiber.Ctx) error {
 		return c.Status(400).SendString(err.Error())
 	}
 	if err := h.svc.Create(c.Context(), &t); err != nil {
-		if err.Error() == "title is required" || err.Error() == "no board found" || err.Error() == "assignee is not a board member" {
+		if isBadRequestError(err) {
 			return c.Status(400).SendString(err.Error())
 		}
 		return c.Status(500).SendString(err.Error())
@@ -63,7 +64,26 @@ func (h *Handler) UpdateTask(c *fiber.Ctx) error {
 		if err.Error() == "no rows in result set" {
 			return c.Status(404).SendString("Task not found")
 		}
-		if err.Error() == "assignee is not a board member" {
+		if isBadRequestError(err) {
+			return c.Status(400).SendString(err.Error())
+		}
+		return c.Status(500).SendString(err.Error())
+	}
+	return c.JSON(updated)
+}
+
+func (h *Handler) ApplyReviewAction(c *fiber.Ctx) error {
+	id, _ := strconv.Atoi(c.Params("id"))
+	var req ReviewActionReq
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).SendString(err.Error())
+	}
+	updated, err := h.svc.ApplyReviewAction(c.Context(), id, req)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return c.Status(404).SendString("Task not found")
+		}
+		if isBadRequestError(err) {
 			return c.Status(400).SendString(err.Error())
 		}
 		return c.Status(500).SendString(err.Error())
@@ -139,4 +159,16 @@ func (h *Handler) SearchTasks(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(results)
+}
+
+func isBadRequestError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	switch s {
+	case "title is required", "no board found", "assignee is not a board member", "review action is required", "invalid review action", "initial task state is not allowed":
+		return true
+	}
+	return strings.Contains(s, "invalid task transition") || strings.Contains(s, "required")
 }

@@ -10,7 +10,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	agentsmodule "moziboard-backend/internal/modules/agents"
-	tasksmodule "moziboard-backend/internal/modules/tasks"
+	"moziboard-backend/internal/workflow"
 )
 
 type HashTokenFunc func(string) string
@@ -21,6 +21,7 @@ type AgentInfra interface {
 	CloseOtherRuns(taskID int, agentID string, keepRunID int)
 }
 type LogActivityFunc func(taskID int, userID, action, details string)
+type AuditLogFunc func(actorType, actorID, entityType, entityID, action string, oldValue, newValue, metadata interface{})
 type BroadcastFunc func(msg string)
 
 type BoardStatsUpdater interface {
@@ -33,12 +34,13 @@ type Service struct {
 	signWebhookPayload SignPayloadFunc
 	agentInfra         AgentInfra
 	logActivity        LogActivityFunc
+	auditLog           AuditLogFunc
 	broadcast          BroadcastFunc
 	boardStats         BoardStatsUpdater
 }
 
-func NewService(repo *Repository, hashToken HashTokenFunc, signWebhookPayload SignPayloadFunc, agentInfra AgentInfra, logActivity LogActivityFunc, broadcast BroadcastFunc, boardStats BoardStatsUpdater) *Service {
-	return &Service{repo: repo, hashToken: hashToken, signWebhookPayload: signWebhookPayload, agentInfra: agentInfra, logActivity: logActivity, broadcast: broadcast, boardStats: boardStats}
+func NewService(repo *Repository, hashToken HashTokenFunc, signWebhookPayload SignPayloadFunc, agentInfra AgentInfra, logActivity LogActivityFunc, auditLog AuditLogFunc, broadcast BroadcastFunc, boardStats BoardStatsUpdater) *Service {
+	return &Service{repo: repo, hashToken: hashToken, signWebhookPayload: signWebhookPayload, agentInfra: agentInfra, logActivity: logActivity, auditLog: auditLog, broadcast: broadcast, boardStats: boardStats}
 }
 
 func extractBearerToken(c *fiber.Ctx) string {
@@ -47,23 +49,6 @@ func extractBearerToken(c *fiber.Ctx) string {
 		return strings.TrimSpace(auth[7:])
 	}
 	return ""
-}
-
-func normalizeRunStatus(taskStatus string) string {
-	switch strings.ToLower(strings.TrimSpace(taskStatus)) {
-	case "todo", "assigned":
-		return "queued"
-	case "in_progress", "doing":
-		return "running"
-	case "review", "qa":
-		return "review"
-	case "blocked":
-		return "blocked"
-	case "done":
-		return "done"
-	default:
-		return "queued"
-	}
 }
 
 func (s *Service) ResolveRuntimeAgent(ctx context.Context, c *fiber.Ctx) (*agentsmodule.AgentConnector, error) {
@@ -138,17 +123,11 @@ func (s *Service) ensureActiveRun(ctx context.Context, taskID int, agentID strin
 	if s.agentInfra == nil {
 		return 0, fmt.Errorf("agent infra not configured")
 	}
-	created := s.agentInfra.CreateAgentRun(taskID, agentID, "running", "Started work")
+	created := s.agentInfra.CreateAgentRun(taskID, agentID, workflow.MapTaskStateToRunState(workflow.StateInProgress), "Started work")
 	if created == nil {
 		return 0, fmt.Errorf("failed to create run")
 	}
 	return *created, nil
-}
-
-func (s *Service) syncTaskAndRunState(ctx context.Context, taskID int, agentID string, taskStatus string, currentActivity string, blockedReason string, resultSummary string) error {
-	listID := tasksmodule.StatusToListID(taskStatus)
-	runStatus := normalizeRunStatus(taskStatus)
-	return s.repo.UpdateTaskAndRunState(ctx, taskID, agentID, taskStatus, listID, currentActivity, blockedReason, resultSummary, runStatus)
 }
 
 func (s *Service) RuntimeHeartbeat(ctx context.Context, conn *agentsmodule.AgentConnector, req HeartbeatReq) error {
@@ -173,6 +152,13 @@ func (s *Service) RuntimeTaskAck(ctx context.Context, conn *agentsmodule.AgentCo
 	if err := s.ensureAgentBoardAccess(ctx, conn.AgentID, req.TaskID); err != nil {
 		return 0, err
 	}
+	task, err := s.repo.GetTaskByID(ctx, req.TaskID)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := workflow.ValidateTransition(workflow.TransitionRequest{FromState: task.Status, ToState: workflow.StateInProgress, Trigger: workflow.TriggerRuntimeAck, ActorType: "agent", ActorID: conn.AgentID}); err != nil {
+		return 0, err
+	}
 	runID, err := s.ensureActiveRun(ctx, req.TaskID, conn.AgentID)
 	if err != nil {
 		return 0, err
@@ -182,19 +168,16 @@ func (s *Service) RuntimeTaskAck(ctx context.Context, conn *agentsmodule.AgentCo
 		msg = "Task accepted, starting work."
 	}
 	_ = s.repo.InsertComment(ctx, req.TaskID, conn.AgentID, msg)
-	_ = s.syncTaskAndRunState(ctx, req.TaskID, conn.AgentID, "in_progress", "Working on task", "", "")
-	_ = s.repo.UpdateAgentWorkingState(ctx, conn.AgentID, req.TaskID, runID, "Working on task")
+	if err := s.repo.ApplyTaskStateSync(ctx, req.TaskID, conn.AgentID, runID, workflow.StateInProgress, "Working on task", "", ""); err != nil {
+		return 0, err
+	}
 	if s.logActivity != nil {
 		go s.logActivity(req.TaskID, conn.AgentID, "acknowledged", msg)
 	}
-	if s.broadcast != nil {
-		go s.broadcast("UPDATE")
+	if s.auditLog != nil {
+		s.auditLog("agent", conn.AgentID, "task", fmt.Sprintf("%d", req.TaskID), "runtime_ack", map[string]interface{}{"status": task.Status}, map[string]interface{}{"status": workflow.StateInProgress}, map[string]interface{}{"message": msg, "run_id": runID})
 	}
-	if s.boardStats != nil {
-		if boardID, err := s.repo.GetBoardIDByTaskID(ctx, req.TaskID); err == nil {
-			go s.boardStats.RecomputeBoard(context.Background(), boardID)
-		}
-	}
+	s.afterTaskMutation(ctx, req.TaskID)
 	return runID, nil
 }
 
@@ -202,8 +185,17 @@ func (s *Service) RuntimeTaskUpdate(ctx context.Context, conn *agentsmodule.Agen
 	if err := s.ensureAgentBoardAccess(ctx, conn.AgentID, req.TaskID); err != nil {
 		return 0, err
 	}
-	if req.Status == "" {
-		req.Status = "in_progress"
+	task, err := s.repo.GetTaskByID(ctx, req.TaskID)
+	if err != nil {
+		return 0, err
+	}
+	toState := workflow.NormalizeTaskState(req.Status)
+	if strings.TrimSpace(req.Status) == "" {
+		toState = workflow.NormalizeTaskState(task.Status)
+	}
+	result, err := workflow.ValidateTransition(workflow.TransitionRequest{FromState: task.Status, ToState: toState, Trigger: workflow.TriggerRuntimeUpdate, ActorType: "agent", ActorID: conn.AgentID, Reason: req.BlockedReason})
+	if err != nil {
+		return 0, err
 	}
 	runID, err := s.ensureActiveRun(ctx, req.TaskID, conn.AgentID)
 	if err != nil {
@@ -212,26 +204,23 @@ func (s *Service) RuntimeTaskUpdate(ctx context.Context, conn *agentsmodule.Agen
 	if req.ProgressMessage != "" {
 		_ = s.repo.InsertComment(ctx, req.TaskID, conn.AgentID, req.ProgressMessage)
 	}
-	_ = s.syncTaskAndRunState(ctx, req.TaskID, conn.AgentID, req.Status, req.CurrentActivity, req.BlockedReason, "")
-	agentStatus := "busy"
-	if req.Status == "blocked" {
-		agentStatus = "blocked"
+	if err := s.repo.ApplyTaskStateSync(ctx, req.TaskID, conn.AgentID, runID, result.NormalizedTo, req.CurrentActivity, req.BlockedReason, ""); err != nil {
+		return 0, err
 	}
-	_ = s.repo.UpdateAgentTaskState(ctx, conn.AgentID, agentStatus, req.TaskID, runID, req.CurrentActivity, req.BlockedReason)
-	if req.Status == "blocked" && s.agentInfra != nil {
+	if result.NormalizedTo == workflow.StateBlocked && s.agentInfra != nil {
 		s.agentInfra.CreateNotification(&req.TaskID, conn.AgentID, nil, "blocked", req.BlockedReason)
 	}
 	if s.logActivity != nil {
-		go s.logActivity(req.TaskID, conn.AgentID, "runtime_update", fmt.Sprintf("Status updated to %s", req.Status))
-	}
-	if s.broadcast != nil {
-		go s.broadcast("UPDATE")
-	}
-	if s.boardStats != nil {
-		if boardID, err := s.repo.GetBoardIDByTaskID(ctx, req.TaskID); err == nil {
-			go s.boardStats.RecomputeBoard(context.Background(), boardID)
+		details := fmt.Sprintf("Status updated to %s", result.NormalizedTo)
+		if req.ProgressMessage != "" {
+			details = req.ProgressMessage
 		}
+		go s.logActivity(req.TaskID, conn.AgentID, result.ActivityAction, details)
 	}
+	if s.auditLog != nil {
+		s.auditLog("agent", conn.AgentID, "task", fmt.Sprintf("%d", req.TaskID), result.ActivityAction, map[string]interface{}{"status": task.Status}, map[string]interface{}{"status": result.NormalizedTo}, map[string]interface{}{"progress_message": req.ProgressMessage, "blocked_reason": req.BlockedReason, "run_id": runID})
+	}
+	s.afterTaskMutation(ctx, req.TaskID)
 	return runID, nil
 }
 
@@ -245,14 +234,7 @@ func (s *Service) RuntimeTaskComment(ctx context.Context, conn *agentsmodule.Age
 	if s.logActivity != nil {
 		go s.logActivity(req.TaskID, conn.AgentID, "commented", req.Content)
 	}
-	if s.broadcast != nil {
-		go s.broadcast("UPDATE")
-	}
-	if s.boardStats != nil {
-		if boardID, err := s.repo.GetBoardIDByTaskID(ctx, req.TaskID); err == nil {
-			go s.boardStats.RecomputeBoard(context.Background(), boardID)
-		}
-	}
+	s.afterTaskMutation(ctx, req.TaskID)
 	return nil
 }
 
@@ -268,14 +250,7 @@ func (s *Service) RuntimeTaskDeliverable(ctx context.Context, conn *agentsmodule
 	if s.logActivity != nil {
 		go s.logActivity(req.TaskID, conn.AgentID, "deliverable", fmt.Sprintf("Submitted deliverable: %s", req.Title))
 	}
-	if s.broadcast != nil {
-		go s.broadcast("UPDATE")
-	}
-	if s.boardStats != nil {
-		if boardID, err := s.repo.GetBoardIDByTaskID(ctx, req.TaskID); err == nil {
-			go s.boardStats.RecomputeBoard(context.Background(), boardID)
-		}
-	}
+	s.afterTaskMutation(ctx, req.TaskID)
 	return runID, nil
 }
 
@@ -283,22 +258,38 @@ func (s *Service) RuntimeTaskReviewRequest(ctx context.Context, conn *agentsmodu
 	if err := s.ensureAgentBoardAccess(ctx, conn.AgentID, req.TaskID); err != nil {
 		return 0, err
 	}
+	task, err := s.repo.GetTaskByID(ctx, req.TaskID)
+	if err != nil {
+		return 0, err
+	}
+	result, err := workflow.ValidateTransition(workflow.TransitionRequest{FromState: task.Status, ToState: workflow.StateReview, Trigger: workflow.TriggerReviewRequested, ActorType: "agent", ActorID: conn.AgentID})
+	if err != nil {
+		return 0, err
+	}
 	runID, _ := s.ensureActiveRun(ctx, req.TaskID, conn.AgentID)
-	_ = s.syncTaskAndRunState(ctx, req.TaskID, conn.AgentID, "review", "Waiting for review", "", req.Summary)
-	_ = s.repo.UpdateAgentWaitingReview(ctx, conn.AgentID)
+	if err := s.repo.ApplyTaskStateSync(ctx, req.TaskID, conn.AgentID, runID, result.NormalizedTo, "Waiting for review", "", req.Summary); err != nil {
+		return 0, err
+	}
 	if req.Summary != "" {
 		_ = s.repo.InsertComment(ctx, req.TaskID, conn.AgentID, req.Summary)
 	}
 	if s.logActivity != nil {
 		go s.logActivity(req.TaskID, conn.AgentID, "review_requested", req.Summary)
 	}
+	if s.auditLog != nil {
+		s.auditLog("agent", conn.AgentID, "task", fmt.Sprintf("%d", req.TaskID), "review_requested", map[string]interface{}{"status": task.Status}, map[string]interface{}{"status": result.NormalizedTo}, map[string]interface{}{"summary": req.Summary, "run_id": runID})
+	}
+	s.afterTaskMutation(ctx, req.TaskID)
+	return runID, nil
+}
+
+func (s *Service) afterTaskMutation(ctx context.Context, taskID int) {
 	if s.broadcast != nil {
 		go s.broadcast("UPDATE")
 	}
 	if s.boardStats != nil {
-		if boardID, err := s.repo.GetBoardIDByTaskID(ctx, req.TaskID); err == nil {
+		if boardID, err := s.repo.GetBoardIDByTaskID(ctx, taskID); err == nil {
 			go s.boardStats.RecomputeBoard(context.Background(), boardID)
 		}
 	}
-	return runID, nil
 }
